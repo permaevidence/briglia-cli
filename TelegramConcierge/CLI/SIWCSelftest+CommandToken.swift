@@ -39,9 +39,11 @@ extension SIWCSelftest {
     @MainActor
     static func commandTokenTests(_ root: URL, _ c: Checks) async throws {
         try resetLive()
-        let owner = FakeSettingsOwner()
-        let writer = SettingsWriter(host: owner)
-        let gate = writer.gate
+        // Each row gets a fresh writer (and gate): a row that wedges its
+        // gate (the bug under a deliberate break) cannot stall the next ones.
+        var writer = SettingsWriter(host: FakeSettingsOwner())
+        var gate = writer.gate
+        func fresh() { writer = SettingsWriter(host: FakeSettingsOwner()); gate = writer.gate }
         let savedOwner = SettingsClient.inProcessOwner, savedWriter = SettingsClient.inProcessWriter
         // The daemon's wiring (startSettingsOwner).
         SettingsClient.inProcessOwner = { change, stillValid in await writer.commit(change, stillValid: stillValid) }
@@ -59,6 +61,7 @@ extension SIWCSelftest {
         c.check("cmd-token T1: a task asking again for the token it holds is refused at once, never waits on itself",
                 t1?.0 == true && t1?.1 == true && t1?.2 == true && gate.reentryRefusals == 1 && !gate.isHeld, "\(String(describing: t1))")
 
+        fresh()
         // T2. A task SPAWNED by the holder (inherits task-locals, not the
         // token) waits its turn: not refused, not reused, gets the token after release.
         let t2 = await finishes(within: 5) { () -> (Bool, Bool, Bool) in
@@ -73,8 +76,9 @@ extension SIWCSelftest {
             return (queued, await child.value, true)
         }
         c.check("cmd-token T2: a task spawned while the token is held queues behind it (not refused, not reused)",
-                t2?.0 == true && t2?.1 == true && gate.reentryRefusals == 1 && !gate.isHeld, "\(String(describing: t2))")
+                t2?.0 == true && t2?.1 == true && gate.reentryRefusals == 0 && !gate.isHeld, "\(String(describing: t2))")
 
+        fresh()
         // T3. The real chain the Telegram command uses (SIWCSurface.setOptIn →
         // SettingsClient.commit → in-process owner → writer.commit) inside the
         // holding task: applied under that token, which stays held.
@@ -90,6 +94,7 @@ extension SIWCSelftest {
         c.check("cmd-token T3: a commit from the task holding the token runs under it (applied, token still held, no hang)",
                 t3?.0 == .applied && t3?.1 == true && t3?.2 == true && !gate.isHeld, "\(String(describing: t3))")
 
+        fresh()
         // T4. The same commit from ANOTHER task while the token is held waits
         // for the release (the writer reuses only the caller's own token).
         let holder = Outcome<SettingsCommitGate.Token>()
@@ -99,7 +104,8 @@ extension SIWCSelftest {
             while release.value != true { try? await Task.sleep(nanoseconds: 10_000_000) }
             if let t = holder.value { gate.release(t) }
         }
-        while !holder.done { try? await Task.sleep(nanoseconds: 5_000_000) }
+        let deadline4a = ProcessInfo.processInfo.systemUptime + 5
+        while !holder.done, ProcessInfo.processInfo.systemUptime < deadline4a { try? await Task.sleep(nanoseconds: 5_000_000) }
         let other = Outcome<SettingsCommitResult>()
         Task { @MainActor in other.value = await SIWCSurface.setOptIn(false, origin: "selftest"); other.done = true }
         try? await Task.sleep(nanoseconds: 200_000_000)
@@ -111,6 +117,7 @@ extension SIWCSelftest {
                 waitedWhileHeld && other.done && other.value?.state == .applied && !gate.isHeld,
                 "waited \(waitedWhileHeld) done \(other.done) \(String(describing: other.value?.state))")
 
+        fresh()
         // T5. The SIWC writer entry points (cancel, sign-out) inside the
         // holding task answer at once and leave the token to its owner.
         let store = SIWCStore.resolved()
@@ -128,6 +135,7 @@ extension SIWCSelftest {
         c.check("cmd-token T5: SIWC cancel and sign-out from the holding task answer at once (nothing to cancel / not signed in), token kept",
                 t5?.0 == .applied && t5?.1 == true && t5?.2 == true && !gate.isHeld, "\(String(describing: t5))")
 
+        fresh()
         // T6. Admission closed (a lifecycle operation): no reuse; the nested
         // commit is refused exactly as before, nothing written.
         try KeychainHelper.save(key: SIWCSurface.optInKey, value: "1")
@@ -144,6 +152,7 @@ extension SIWCSelftest {
                 t6?.0 == .refused && t6?.1 == true && !gate.isHeld, "\(String(describing: t6))")
         try? KeychainHelper.delete(key: SIWCSurface.optInKey)
 
+        fresh()
         // T7. A command that had to WAIT for the token (handed over by the
         // previous holder) owns it too: its nested commit runs under it.
         let first = Outcome<Bool>()
@@ -153,7 +162,8 @@ extension SIWCSelftest {
             try? await Task.sleep(nanoseconds: 150_000_000)
             gate.release(t); first.done = true
         }
-        while first.value == nil, !first.done { try? await Task.sleep(nanoseconds: 5_000_000) }
+        let deadline7 = ProcessInfo.processInfo.systemUptime + 5
+        while first.value == nil, !first.done, ProcessInfo.processInfo.systemUptime < deadline7 { try? await Task.sleep(nanoseconds: 5_000_000) }
         let t7 = await finishes(within: 5) { () -> (Bool, SettingsCommitResult.State, Bool) in
             guard let mine = await gate.acquire() else { return (false, .error, false) }   // queued behind `first`
             let r = await SIWCSurface.setOptIn(true, origin: "selftest")

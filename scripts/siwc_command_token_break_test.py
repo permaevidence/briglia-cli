@@ -30,9 +30,16 @@ WS = S + "SettingsWriter+SIWC.swift"
 # (label, check label prefix that must fail, file, old, new)
 BREAKS = [
     ("K1 0.2.69: writer.commit never reuses the caller's token",
-     "telegram: /subscription login official sends the sign-in link", W,
+     "telegram: after the login command the settings token is free and the preview opt-in is saved", W,
      "        if let held = reusableHeldToken() {\n            let r = await commitHolding(held, change, policy: policy, stillValid: stillValid)",
      "        if false, let held = reusableHeldToken() {\n            let r = await commitHolding(held, change, policy: policy, stillValid: stillValid)"),
+    ("K12 the whole 0.2.69 shape (no reuse anywhere, no reentry guard): the command waits on itself",
+     "telegram: /subscription login official sends the sign-in link", None, [
+        (W, "        if let held = reusableHeldToken() {\n            let r = await commitHolding(held, change, policy: policy, stillValid: stillValid)",
+            "        if false, let held = reusableHeldToken() {\n            let r = await commitHolding(held, change, policy: policy, stillValid: stillValid)"),
+        (W, "        if let held = reusableHeldToken() { return (held, true) }", "        _ = reusableHeldToken()"),
+        (G, "        if tokenHeldByCurrentTask != nil {\n            // Waiting here", "        if false, tokenHeldByCurrentTask != nil {\n            // Waiting here"),
+     ], None),
     ("K2 commit reuse removed (in-process row)",
      "cmd-token T3: a commit from the task holding the token runs under it", W,
      "        if let held = reusableHeldToken() {\n            let r = await commitHolding(held, change, policy: policy, stillValid: stillValid)",
@@ -142,7 +149,11 @@ def main():
         for label, check, rel, old, new in BREAKS:
             if args.only and label.split()[0] not in args.only.split(","):
                 continue
-            original = mutate(tree, rel, old, new)
+            edits = old if rel is None else [(rel, old, new)]
+            originals = {}
+            for erel, eold, enew in edits:
+                text = mutate(tree, erel, eold, enew)
+                originals.setdefault(erel, text)
             try:
                 binary = build(tree, scratch)
                 r = test(binary, work)
@@ -155,7 +166,8 @@ def main():
                 if not caught and args.verbose:
                     print((r.stdout + r.stderr)[-6000:])
             finally:
-                (tree / rel).write_text(original)
+                for erel, text in originals.items():
+                    (tree / erel).write_text(text)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{executed - failures}/{executed} deliberate breaks caught")
