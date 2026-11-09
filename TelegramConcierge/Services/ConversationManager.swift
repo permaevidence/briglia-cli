@@ -128,6 +128,9 @@ class ConversationManager: ObservableObject {
         var completionQueued = false
         /// The run's notice series, one per destination.
         var series: [NoticeSeries.Target: UUID] = [:]
+        /// Tool calls of the run's batch at /stop time (GPT_APPLY_PATCH_PLAN
+        /// §12.2: a GPT patch commit's outcome is named when the run ends).
+        var batchCallIds: [String] = []
     }
     @Published var stoppedRunsFinishing: [UUID: StoppedRunFinishing] = [:]
     var stoppedRunWatchers: [UUID: Task<Void, Never>] = [:]
@@ -998,6 +1001,10 @@ class ConversationManager: ObservableObject {
     /// Cache diagnosis bookkeeping (main lane): the previous request's tool
     /// signature and frozen system-prompt date.
     var cacheDiagnosticsToolSignature: String?
+    /// The running main turn's editing lease (GPT_APPLY_PATCH_PLAN §3.2):
+    /// set for the duration of `generateResponseWithTools`, read by that
+    /// turn's prune-summary sends; nil between turns.
+    var mainRunEditing: EditingRun?
     var cacheDiagnosticsSystemDate: Date?
 
     /// Selftest seam: observe the commit's save boundaries ("afterCheckpoint",

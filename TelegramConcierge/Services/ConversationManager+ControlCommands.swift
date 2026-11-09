@@ -325,6 +325,9 @@ extension ConversationManager {
             await backgroundPruneCommand(argument: commandArgument(from: text))
             return true
         // }BGPRUNE
+        case "/gptpatch":
+            await handleGPTPatchCommand(argument: commandArgument(from: text))
+            return true
         case "/archiveinline":
             await handleArchiveInlineCommand(argument: commandArgument(from: text))
             return true

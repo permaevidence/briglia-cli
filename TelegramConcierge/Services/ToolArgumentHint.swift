@@ -66,6 +66,7 @@ enum ToolArgumentHint {
         Rule(tool: "edit_file", prefix: "edit_file requires 'path'", fields: ["path"]),
         Rule(tool: "edit_file", prefix: "edit_file requires either 'edits' array or 'old_string'+'new_string'", presence: .editFormats),
         Rule(tool: "apply_patch", prefix: "apply_patch requires 'patch_text'", fields: ["patch_text"]),
+        Rule(tool: "apply_patch", prefix: "apply_patch requires 'input'", fields: ["input"]),
         Rule(tool: "grep", prefix: "grep requires 'pattern' and 'path'", fields: ["pattern", "path"]),
         Rule(tool: "glob", prefix: "glob requires 'pattern'", fields: ["pattern"]),
         Rule(tool: "list_dir", prefix: "list_dir requires 'path'", fields: ["path"]),
@@ -163,11 +164,12 @@ enum ToolCallRouting {
     }
 
     /// The response with every call stamped with `setup`; other cases as is.
-    static func stamp(_ response: LLMResponse, setup: Setup) -> LLMResponse {
+    static func stamp(_ response: LLMResponse, setup: Setup, editing: EditingConfig = .standard) -> LLMResponse {
         guard case .toolCalls(let assistant, let calls, let prompt, let completion, let spend) = response else { return response }
         let stamped = calls.map { call -> ToolCall in
             var copy = call
             copy.routing = setup
+            copy.editing = editing
             return copy
         }
         return .toolCalls(assistantMessage: assistant, calls: stamped, promptTokens: prompt, completionTokens: completion, spendUSD: spend)

@@ -535,7 +535,7 @@ extension ConversationManager {
                         turnStartDate: turnStartDate,
                         tailUserMessage: tail,
                         deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                        execution: summaryExecution, lane: .main, persona: persona
+                        execution: summaryExecution, lane: .main, persona: persona, editingRun: mainRunEditing
                     )
                 } catch {
                     guard rejectThrownReply(error, "attempt \(attempt)") else { throw error }
@@ -589,7 +589,7 @@ extension ConversationManager {
                                 turnStartDate: turnStartDate,
                                 tailUserMessage: retryTail,
                                 deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                                execution: summaryExecution, lane: .main, persona: persona
+                                execution: summaryExecution, lane: .main, persona: persona, editingRun: mainRunEditing
                             )
                             recordPruneSummarySpend(spendUSD(from: retryResponse))
                             switch retryResponse {

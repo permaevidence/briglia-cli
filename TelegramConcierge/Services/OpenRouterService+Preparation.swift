@@ -12,7 +12,8 @@ extension OpenRouterService {
         tailSystemMessage: String?, tailUserMessage: String?,
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]?,
         promptStyle: SubagentPromptStyle = .messaging,
-        persona: PromptPersona? = nil
+        persona: PromptPersona? = nil,
+        editing: EditingConfig = .standard
     ) -> PreparedConversation {
         // Add system message with date context (date-only for prompt cache stability)
         let dateFormatter = DateFormatter()
@@ -132,8 +133,7 @@ extension OpenRouterService {
             - For non-trivial implementation tasks, use `todo_write` early and keep exactly one item `in_progress`.
             - Protect shared worktrees: inspect status before edits, never discard unrelated changes, and do not commit, push, or rewrite history unless asked.
             - Your first edit in a git repo auto-creates a pre-edit checkpoint ([GIT CHECKPOINT] block, with the snapshot SHA). Before reporting a multi-file change done, self-review with `git diff --stat <sha>` to confirm only intended files changed; use `git checkout <sha> -- <path>` to roll back a botched file.
-            - Use dedicated filesystem tools for code work; prefer `edit_file` (batched edits) for code edits\(AvailableTools.applyPatchEnabled ? ", reserving `apply_patch` for multi-file patches and renames" : "; when a task requires renaming or deleting files, use bash and prefer git mv / git rm inside repos so changes stay recoverable").
-            - Project instruction files (AGENTS.md/CLAUDE.md) are auto-appended to a tool result the first time you touch a project, every one from the repository root down to where you work; follow them for all work under their folder, and where they conflict the one nearer your work wins. When you change something a project's AGENTS.md describes (commands, structure, conventions), update it in the same change. When you learn a durable, non-obvious project fact the hard way (build/test commands, conventions, gotchas), propose adding it to the project's AGENTS.md; if you keep working in a project that has none, offer to create one. Keep these files short: only what an agent would likely miss without them.
+            \(Self.editingBullets(editing: editing, tools: tools))- Project instruction files (AGENTS.md/CLAUDE.md) are auto-appended to a tool result the first time you touch a project, every one from the repository root down to where you work; follow them for all work under their folder, and where they conflict the one nearer your work wins. When you change something a project's AGENTS.md describes (commands, structure, conventions), update it in the same change. When you learn a durable, non-obvious project fact the hard way (build/test commands, conventions, gotchas), propose adding it to the project's AGENTS.md; if you keep working in a project that has none, offer to create one. Keep these files short: only what an agent would likely miss without them.
             - A code change is not done until verified. After finishing your edits, run the project's declared check — from its AGENTS.md or the auto-injected [PROJECT VERIFICATION] block (typecheck, build, or focused test; narrowest that covers the change) — and report the result. If you genuinely cannot verify, say exactly what you skipped.
             - For reviews, lead with findings ordered by severity, or say clearly that no issues were found.
 
@@ -158,7 +158,7 @@ extension OpenRouterService {
             // Multi-assistant stage 3: only together with the board tool
             // (several assistants on this computer); absent otherwise.
             if tools?.contains(where: { $0.function.name == "board" }) == true {
-                prompt += MultiAssistantHooks.promptSection
+                prompt += editing.isGPT ? MultiAssistantHooks.promptSectionGPT : MultiAssistantHooks.promptSection
             }
 
             // Skills index — compact list of installed curated skills.
@@ -289,5 +289,30 @@ extension OpenRouterService {
             tools: tools, toolResultMessages: toolResultMessages,
             tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage
         )
+    }
+}
+
+extension OpenRouterService {
+    /// The standard editing bullet, byte for byte as before
+    /// (GPT_APPLY_PATCH_PLAN I1), each line ending in a newline.
+    static func standardEditingBullet() -> String {
+        "- Use dedicated filesystem tools for code work; prefer `edit_file` (batched edits) for code edits\(AvailableTools.applyPatchEnabled ? ", reserving `apply_patch` for multi-file patches and renames" : "; when a task requires renaming or deleting files, use bash and prefer git mv / git rm inside repos so changes stay recoverable").\n"
+    }
+
+    /// §4.4: the editing bullets for this request. `.standard`: today's
+    /// line. `.gpt`: the apply_patch how-to, only when `apply_patch` is in
+    /// the tool list being sent (a restricted child without edit tools gets
+    /// neither). Decided from the explicit editing configuration, never
+    /// inferred from the tool list alone.
+    static func editingBullets(editing: EditingConfig, tools: [ToolDefinition]?) -> String {
+        guard editing.isGPT else { return standardEditingBullet() }
+        guard tools?.contains(where: { $0.function.name == "apply_patch" }) == true else { return "" }
+        let how = editing.form == .freeform
+            ? "It is a FREEFORM tool: send the raw patch, do not wrap it in JSON."
+            : "Put the whole patch in the `input` string."
+        return "- Edit files with `apply_patch` (never `applypatch` or `apply-patch`). \(how)\n"
+            + "- Paths must be absolute (`/Users/…/repo/src/x.py`); Briglia has no working directory.\n"
+            + "- Format: `*** Begin Patch`, then `*** Add File: <path>` (every line `+`), `*** Delete File: <path>`, or `*** Update File: <path>` (optional `*** Move to: <path>`, which still needs at least one hunk) with `@@` hunks of ` `/`-`/`+` lines, three lines of context, `@@ <class or def>` to narrow the location; `*** End of File` when a hunk ends at the end of the file; then `*** End Patch`. To rewrite a whole file you have read, use `*** Add File:` on it.\n"
+            + "- Do not re-read a file after a successful patch. Pure renames: `git mv` or `mv` in bash.\n"
     }
 }

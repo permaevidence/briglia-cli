@@ -1,0 +1,12 @@
+{
+  "note": "GPT apply_patch S2 (GPT_APPLY_PATCH_PLAN \u00a73.2, \u00a76.6, \u00a77): in-memory ToolCall.editing and ToolResultMessage.editOutcome/gptEvidence, excluded from CodingKeys/encode; persisted bytes unchanged.",
+  "sha256": {
+    "TelegramConcierge/Models/Message.swift": "ede6d4122232db43ffa9b6aa31d58c81d9a4b65daf39916f6d524a2d4657bbfc",
+    "TelegramConcierge/Models/ToolModels.swift": "270183317f9b37326d91d1260e43bb4ceb6b3423aa013d59c30b30cd3f4167d4",
+    "TelegramConcierge/Services/ConversationManager.swift#declaration": "53b709e51efe69a0eeca2bff35671296cfd64c5810a2ddc71b0aed1005e4fa06",
+    "TelegramConcierge/Services/HarnessAnnotations.swift": "eb5b8169c68bd4fea5d9a4c4e99da47178a059a0fd8b9ba1640222f0c98a51e3",
+    "TelegramConcierge/Services/OpenRouterService.swift#declaration": "51272020cb6063053dc3d5831c878acf9f440945b1925200cc6e5259e6efd804",
+    "TelegramConcierge/Services/SubagentSessionRegistry.swift#declaration": "1f51ab9a9ada64f48e1da264fcd1cf59443dd3026172a2ebf32f3172cfc6d064"
+  },
+  "source": "4dd86133de03b484bed62fb81ce59935b89a7de8"
+}

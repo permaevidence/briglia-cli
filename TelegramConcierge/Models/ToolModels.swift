@@ -189,6 +189,11 @@ struct ToolCall: Codable, Identifiable {
     /// persisted history are unchanged; a call decoded from disk has nil
     /// (= unknown).
     var routing: ToolCallRouting.Setup? = nil
+    /// Editing configuration of the request that produced this call
+    /// (GPT_APPLY_PATCH_PLAN §3.2 stamping). In memory only, never encoded;
+    /// dispatch reads it and never re-resolves. nil = unknown (a call that
+    /// did not come from a stamped response): `apply_patch` then fails closed.
+    var editing: EditingConfig? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, type, function
@@ -596,6 +601,18 @@ struct ToolResultMessage: Codable {
     /// summarizers or archives. A malformed value decodes as empty (no
     /// evidence), never a load failure.
     var deliveredCompletions: [UUID] = []
+
+    /// Typed outcome of a GPT `apply_patch` (direct or an intercepted bash
+    /// heredoc; GPT_APPLY_PATCH_PLAN §6.6, §9.1). In memory only, never
+    /// encoded: its consumers (tool stage, telemetry, `/status` log,
+    /// verification, claims) read it instead of searching the text. nil for
+    /// every other call, whose consumers keep today's text checks.
+    var editOutcome: CodexPatch.EditOutcome? = nil
+
+    /// GPT-only read-before-write evidence this result earned (§7): published
+    /// by the run only once the result is committed to its history (never for
+    /// cancelled, stale-suppressed or undelivered results). In memory only.
+    var gptEvidence: GPTEvidenceSettlement? = nil
 
     enum CodingKeys: String, CodingKey {
         case role

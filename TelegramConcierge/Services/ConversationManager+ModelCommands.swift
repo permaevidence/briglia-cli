@@ -1189,6 +1189,8 @@ extension ConversationManager {
             contextLine += "\n" + notice
             pendingHostNotice = nil
         }
+        // GPT_APPLY_PATCH_PLAN §3.5: one line, only when the main model is GPT.
+        if let editLine = await gptPatchStatusLine() { contextLine += "\n" + editLine }
         // /stop visibility (R3): stopped requests still finishing, before
         // the background section.
         let stoppedLines = stoppedRunStatusLines()
@@ -1456,15 +1458,18 @@ extension ConversationManager {
             fallbackPatterns: nil
         )
         let deferredSummaries = await MCPRegistry.shared.serverSummaries(for: deferredServerNames)
+        let idleEditing = await editingConfigForEstimate()
         let nativeTools = AvailableTools.all(
             includeWebSearch: searchService != .none,
-            hasDeferredMCPs: !deferredSummaries.isEmpty
+            hasDeferredMCPs: !deferredSummaries.isEmpty,
+            editing: idleEditing
         )
         let toolsForSummary = nativeTools + mainMcpTools
         let mandatoryEstimate = try? await openRouterService.activeTurnRequestEstimate(messages: [], rounds: [],
             images: imagesDirectory, documents: documentsDirectory, tools: toolsForSummary,
             calendar: frozenContext.calendar, email: frozenContext.email, summaries: chunkSummaries,
-            totalChunks: totalChunkCount, date: currentSystemPromptTimestamp(), deferred: deferredSummaries)
+            totalChunks: totalChunkCount, date: currentSystemPromptTimestamp(), deferred: deferredSummaries,
+            editing: idleEditing)
 
         // Use real prompt_tokens from API when available, fall back to estimation.
         // /keepsummaries §4.4: decide on the composed view; a measurement
@@ -1770,3 +1775,15 @@ extension ConversationManager {
 
 /// The Telegram sign-in's prepared publication, handed out of the login hook.
 final class TelegramPublishBox: @unchecked Sendable { var change: PreparedChange? }
+
+extension ConversationManager {
+    /// GPT_APPLY_PATCH_PLAN §3.2: estimates during a running turn use the
+    /// turn's configuration; when idle they resolve one fresh, exactly as
+    /// the next turn would.
+    func editingConfigForEstimate() async -> EditingConfig {
+        if let run = mainRunEditing { return run.config }
+        let context = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
+            reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+        return EditingConfig.resolveAtRunStart(context)
+    }
+}

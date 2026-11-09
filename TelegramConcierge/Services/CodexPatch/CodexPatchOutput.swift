@@ -34,6 +34,10 @@ extension CodexPatch {
         var writtenFiles: [(path: String, text: String)] = []
         var evidence: [GPTEvidence.Receipt] = []
         var forget: [String] = []
+        /// Committed operations by kind (FilesLedger, S2): created files,
+        /// files removed (Delete targets and Move sources).
+        var addedPaths: [String] = []
+        var removedPaths: [String] = []
     }
 
     // MARK: - Model-facing text

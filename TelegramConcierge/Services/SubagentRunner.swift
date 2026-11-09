@@ -217,7 +217,8 @@ actor SubagentRunner {
     /// `nestingAllowed`: the executor the subagent runs on is a direct child
     /// of the main agent (depth 1). A deeper executor never receives `Agent`
     /// at all — the depth cap is structural (R1b, §4.6).
-    static func nativeToolInventory(parentTools: [ToolDefinition], type subagentType: SubagentType, nestingAllowed: Bool = true) -> [ToolDefinition] {
+    static func nativeToolInventory(parentTools: [ToolDefinition], type subagentType: SubagentType, nestingAllowed: Bool = true,
+                                    editing: EditingConfig = .standard) -> [ToolDefinition] {
         if subagentType.isWebResearcher {
             // The Web researcher owns the pipeline's tools directly and
             // nothing else (WEB_SUBAGENT_PLAN §4.1): no bash, no files, no
@@ -251,10 +252,16 @@ actor SubagentRunner {
         // delegation tool does, and only through the branch above.
         var filtered = inventory.filter { $0.function.name != "Agent" && $0.function.name != "mid_turn_message_user" }
         if let whitelist = subagentType.allowedToolNames {
-            filtered = filtered.filter { whitelist.contains($0.function.name) }
+            // GPT_APPLY_PATCH_PLAN §3.3: in a `.gpt` child a whitelist naming
+            // edit_file, write_file or apply_patch grants the GPT apply_patch.
+            var allowed = whitelist
+            if editing.isGPT, !whitelist.isDisjoint(with: AvailableTools.gptPatchGrantingNames) {
+                allowed.formUnion(AvailableTools.gptPatchGrantingNames)
+            }
+            filtered = filtered.filter { allowed.contains($0.function.name) }
         }
         if let delegation { filtered.insert(delegation, at: 0) }
-        return filtered
+        return AvailableTools.applyEditing(filtered, editing)
     }
 
     /// Hard cap on the subagent's final message returned to the parent. Claude Code
@@ -398,8 +405,12 @@ actor SubagentRunner {
         // the user — anything user-relevant belongs in their final result.
         // Delegation (R1b) only for a subagent running directly under the
         // main agent; a nested Web run's executor is deeper and gets no Agent.
+        // GPT_APPLY_PATCH_PLAN §3.3: built as `.standard` here and rebuilt for
+        // the child's own editing configuration once its execution context
+        // is resolved (below); a standard child's inventory is today's.
+        func buildInventory(_ editing: EditingConfig) async -> [ToolDefinition] {
         var filteredTools = Self.nativeToolInventory(parentTools: parentTools, type: subagentType,
-                                                     nestingAllowed: toolExecutor.depth <= 1)
+                                                     nestingAllowed: toolExecutor.depth <= 1, editing: editing)
         // Bash schema and executor capability must agree
         // (BASH_V2_SCHEMA_CLEANUP_PLAN §3.3). Subagents share the managed
         // lifecycle vocabulary but never the main conversation's lanes:
@@ -415,7 +426,7 @@ actor SubagentRunner {
             if filteredNames.contains("bash_manage") {
                 filteredTools = filteredTools.map {
                     switch $0.function.name {
-                    case "bash":        return AvailableTools.bashSubagentManaged
+                    case "bash":        return editing.isGPT ? AvailableTools.gptVariant(AvailableTools.bashSubagentManaged) : AvailableTools.bashSubagentManaged
                     case "bash_manage": return AvailableTools.bashManageSubagentManaged
                     default:            return $0
                     }
@@ -423,7 +434,9 @@ actor SubagentRunner {
                 await toolExecutor.setSubagentBashCapability(.subagentManaged)
             } else {
                 filteredTools = filteredTools.map {
-                    $0.function.name == "bash" ? AvailableTools.bashForegroundOnly : $0
+                    $0.function.name == "bash"
+                        ? (editing.isGPT ? AvailableTools.gptVariant(AvailableTools.bashForegroundOnly) : AvailableTools.bashForegroundOnly)
+                        : $0
                 }
                 await toolExecutor.setSubagentBashCapability(.foregroundOnly)
             }
@@ -441,7 +454,10 @@ actor SubagentRunner {
             )
             filteredTools += subagentMcpTools
         }
-        let allowedToolNames = Set(filteredTools.map { $0.function.name })
+        return filteredTools
+        }
+        var filteredTools = await buildInventory(.standard)
+        var allowedToolNames = Set(filteredTools.map { $0.function.name })
 
         // 3. Session: create or resume. Serialization of resumed sessions is
         // handled by run() above — by the time runBody executes, this runner
@@ -675,6 +691,14 @@ actor SubagentRunner {
         }()
         let responsesExecution: ProviderExecutionContext? = runExecution?.wireProtocol == .responses ? runExecution : nil
         defer { runExecution?.responsesTurn.close() }
+        // GPT_APPLY_PATCH_PLAN §3.3: the child's editing configuration from
+        // its own resolved context (the Web researcher has no file tools and
+        // stays standard); a GPT child gets the GPT inventory.
+        let editingRun: EditingRun? = subagentType.isWebResearcher ? nil : EditingRun.start(runExecution ?? snapshot)
+        if let editingRun, editingRun.config.isGPT {
+            filteredTools = await buildInventory(editingRun.config)
+            allowedToolNames = Set(filteredTools.map { $0.function.name })
+        }
         if responsesExecution != nil,
            !(await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: priorToolInteractions)) {
             return RunResult(sessionId: resolvedSessionId, isNewSession: isNew, finalMessage: "",
@@ -835,7 +859,7 @@ actor SubagentRunner {
                             reasoningEffortOverride: effectiveReasoningOverride,
                             textOnlyOverride: effectiveTextOnlyOverride,
                             execution: roundExecution, lane: .subagent(resolvedSessionId), imageLog: log,
-                            persona: runPersona
+                            persona: runPersona, editingRun: editingRun
                         )
                     },
                     newestUnit: { transmitted in
@@ -917,7 +941,8 @@ actor SubagentRunner {
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
                                 textOnlyOverride: effectiveTextOnlyOverride,
-                                execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona
+                                execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona,
+                                editingRun: editingRun
                             )
                             markProgress()
 
@@ -958,11 +983,12 @@ actor SubagentRunner {
                                 toolsCalledOrdered.append(call.function.name)
                             }
                         } else {
-                            let blocked = ToolResultMessage(
-                                toolCallId: call.id,
-                                content: "{\"error\": \"Tool '\(call.function.name)' is not available to this subagent.\"}"
-                            )
-                            blockedResults.append(blocked)
+                            // GPT_APPLY_PATCH_PLAN §10: a foreign-profile edit
+                            // call gets the hint naming this model's tool.
+                            let content = GPTForeignCall.hint(name: call.function.name, editing: call.editing ?? .standard,
+                                                              exposed: allowedToolNames)
+                                ?? "{\"error\": \"Tool '\(call.function.name)' is not available to this subagent.\"}"
+                            blockedResults.append(ToolResultMessage(toolCallId: call.id, content: content))
                         }
                     }
 
@@ -1009,6 +1035,9 @@ actor SubagentRunner {
                             throw ResponsesFailure.failed("cannot persist subagent tool results")
                         }
                     } else { toolInteractions.append(completed) }
+                    // GPT_APPLY_PATCH_PLAN §7: evidence is published once the
+                    // results are committed to this run's history.
+                    await GPTEvidenceSettlement.publish(ordered)
                     compactionAttempts.didExecuteWork()
 
                     // Pre-flight budget check: if the new interaction pushed the
@@ -1176,7 +1205,8 @@ actor SubagentRunner {
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
                         textOnlyOverride: effectiveTextOnlyOverride,
-                        execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona
+                        execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona,
+                        editingRun: editingRun
                     )
                     markProgress()
 

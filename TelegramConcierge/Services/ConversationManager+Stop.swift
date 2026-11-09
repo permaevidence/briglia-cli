@@ -126,6 +126,12 @@ extension ConversationManager {
             registerStoppedRun(run, task: task, triggerMessageId: stoppedTrigger)
         }
         let observedRun = repeatRun ?? (stoppedTask != nil ? stoppedRun : nil)
+        // GPT_APPLY_PATCH_PLAN §12.2: the batch running at /stop time, to name
+        // a GPT patch's real outcome when the run ends within the grace window.
+        let stopBatchCallIds: [String] = observedRun.flatMap { run -> [String]? in
+            if case .tools(let ids, _, _)? = runPhases[run] { return ids }
+            return nil
+        } ?? []
         // A repeat for an ALREADY-ANNOUNCED run reserves its place in that
         // run's ordered notices now, before any await (Codex impl review
         // R1): if the run ends during the grace wait below, its completion
@@ -202,6 +208,12 @@ extension ConversationManager {
             backgroundPruneStopNote = nil
         }
         // }BGPRUNE
+        if stillFinishing == nil {
+            let patchOutcomes = stopBatchCallIds.compactMap { GPTPatchSettlement.shared.outcome($0) }
+            if !patchOutcomes.isEmpty {
+                text += " " + patchOutcomes.map(GPTPatchSettlement.describe).joined(separator: "; ").capitalizedFirst + "."
+            }
+        }
         if killedBackgroundSubagents > 0 {
             text += " Also stopped \(killedBackgroundSubagents) background assistant\(killedBackgroundSubagents == 1 ? "" : "s")."
         }
@@ -289,6 +301,7 @@ extension ConversationManager {
     private func registerStoppedRun(_ run: UUID, task: Task<Void, Never>, triggerMessageId: UUID?) {
         guard stoppedRunsFinishing[run] == nil, stoppedRunWatchers[run] == nil else { return }
         stoppedRunsFinishing[run] = StoppedRunFinishing(runId: run, triggerMessageId: triggerMessageId, stoppedAt: Date())
+        if case .tools(let callIds, _, _)? = runPhases[run] { stoppedRunsFinishing[run]?.batchCallIds = callIds }
         stoppedRunWatchers[run] = Task { @MainActor [weak self] in
             await task.value
             self?.stoppedRunEnded(run)
@@ -311,7 +324,12 @@ extension ConversationManager {
         if entry.announced && !entry.completionQueued {
             entry.completionQueued = true
             let after = Self.stopDuration(Int(Date().timeIntervalSince(entry.stoppedAt)))
-            let text = "✅ The stopped request has ended. (it ended \(after) after /stop)"
+            var text = "✅ The stopped request has ended. (it ended \(after) after /stop)"
+            // §12.2: a GPT patch that was committing names its real outcome.
+            let patchOutcomes = entry.batchCallIds.compactMap { GPTPatchSettlement.shared.outcome($0) }
+            if !patchOutcomes.isEmpty {
+                text += " " + patchOutcomes.map(GPTPatchSettlement.describe).joined(separator: "; ").capitalizedFirst + "."
+            }
             for id in entry.series.values {
                 noticeSeriesRegistry[id]?.append(text, terminal: true)
             }
@@ -341,6 +359,11 @@ extension ConversationManager {
             return "memory archiving continues \(running(since))"
         case .tools(let callIds, let labels, let since):
             let shown = labels.prefix(3).joined(separator: ", ") + (labels.count > 3 ? " (+\(labels.count - 3) more)" : "")
+            // §12.2: a GPT patch past its last cancellation point runs to
+            // commit or rollback.
+            if callIds.contains(where: { GPTPatchSettlement.shared.isCommitting($0) }) {
+                return "\(shown) — applying a file edit \(running(since))"
+            }
             if let refined = refinedToolStage(callIds: callIds) {
                 return "\(shown) — \(refined) \(running(since))"
             }
@@ -379,6 +402,7 @@ extension ConversationManager {
         if stage == "fs.diff" { return "computing a file diff" }
         if stage.hasPrefix("fs.write") { return "writing a file" }
         if stage == "lsp.diagnostics" { return "checking diagnostics" }
+        if stage == "fs.patch_commit" || stage == "fs.patch_rollback" { return "applying a file edit" }
         return nil
     }
 

@@ -798,6 +798,13 @@ def main():
     result = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "codex_patch_fidelity_check.py")],
                             capture_output=True, text=True, timeout=120)
     check("codex patch source-fidelity gate", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+    # GPT editing profile (stage S2, amendment A1): the GPT >= 5 matcher on every
+    # provider, the .gpt tool surface and prompt, the run lease, dispatch on
+    # the call's editing stamp, typed outcome, ledger, shell reads, heredoc
+    # interception, freeform on OpenRouter's Responses route and the JSON
+    # fallback. Re-executes itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__gpt-profile-selftest", "--fixtures", fixtures], capture_output=True, text=True, timeout=600)
+    check("gpt profile selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
 
     # Same pipe deadlock in the unzip / installer / shortcuts process helpers: a
     # 3,000-entry zip listed and extracted by the real unzip, ~100 KB and 1 MB

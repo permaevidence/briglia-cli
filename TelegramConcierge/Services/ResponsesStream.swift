@@ -418,8 +418,16 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
                 // A recognised invalid-image 400 (bounded body, image-carrying
                 // request) keeps its description; every other status, and its
                 // 401 refresh / retry / Retry-After handling, is unchanged.
-                throw ProviderImageRejection.classify(status: response.statusCode, rawBody: data,
-                                                      requestBody: requestBody, underlying: failure)
+                let classified = ProviderImageRejection.classify(status: response.statusCode, rawBody: data,
+                                                                 requestBody: requestBody, underlying: failure)
+                // GPT_APPLY_PATCH_PLAN §5.6 precedence: SIWC/subscription,
+                // then image rejection, then a freeform tool refusal.
+                if classified is ResponsesFailure,
+                   let custom = GPTCustomToolRejection.classify(status: response.statusCode, rawBody: data,
+                                                                requestBody: requestBody, underlying: classified) {
+                    throw custom
+                }
+                throw classified
             }
             result = .success(streamed ? try assembler.finish() : data)
         } catch { result = .failure(error) }

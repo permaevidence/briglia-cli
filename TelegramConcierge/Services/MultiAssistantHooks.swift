@@ -34,7 +34,11 @@ enum MultiAssistantHooks {
         guard let data = argumentsJSON.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
         var raw: [String] = []
-        if toolName == "apply_patch" {
+        if toolName == "apply_patch", let input = obj["input"] as? String {
+            // GPT apply_patch (GPT_APPLY_PATCH_PLAN §9.2): parsed exactly as
+            // the engine parses it, every operation's paths.
+            raw = CodexPatch.patchPaths(input)
+        } else if toolName == "apply_patch" {
             guard let text = obj["patch_text"] as? String, let ops = try? ApplyPatch.parse(patchText: text) else { return [] }
             for op in ops {
                 switch op {
@@ -109,12 +113,21 @@ enum MultiAssistantHooks {
     // MARK: After
 
     /// Text appended to the tool result ("" when nothing applies).
-    static func after(toolName: String, argumentsJSON: String, resultContent: String, pending: Pending) async -> String {
+    static func after(toolName: String, argumentsJSON: String, resultContent: String, pending: Pending,
+                      outcome: CodexPatch.EditOutcome? = nil) async -> String {
         let ctx = pending.ctx
         var appended = ""
         if let opId = pending.opId {
-            let succeeded = !resultContent.contains("\"error\"")
-            let changed = succeeded || pending.locked.contains { Tripwire.stamp($0) != pending.stampsBefore[$0] }
+            let changed: Bool
+            if let outcome {
+                // §9.1: changed ∪ conflicts (paths that may differ), never
+                // inferred from the text; a stamp change still counts.
+                changed = !(outcome.changed + outcome.conflicts).isEmpty
+                    || pending.locked.contains { Tripwire.stamp($0) != pending.stampsBefore[$0] }
+            } else {
+                let succeeded = !resultContent.contains("\"error\"")
+                changed = succeeded || pending.locked.contains { Tripwire.stamp($0) != pending.stampsBefore[$0] }
+            }
             let scopes = await ClaimScopes.shared.scopesForEdit(opId: opId)
             // The in-process path lock is released only once the settlement
             // is recorded (Codex stage-3 S3-R2-2).
@@ -244,6 +257,11 @@ enum MultiAssistantHooks {
             return refusalContent("board action must be one of: read, post, clear, release")
         }
     }
+
+    /// The `.gpt` variant (GPT_APPLY_PATCH_PLAN §4.4): names only apply_patch.
+    static let promptSectionGPT = promptSection.replacingOccurrences(
+        of: "When you edit a file with write_file/edit_file/apply_patch it is claimed until your turn (and the jobs it started) ends; another assistant's claimed file is refused to those tools",
+        with: "When you edit a file with apply_patch it is claimed until your turn (and the jobs it started) ends; another assistant's claimed file is refused to that tool")
 
     /// The system-prompt section, present only together with the tool.
     static let promptSection = """

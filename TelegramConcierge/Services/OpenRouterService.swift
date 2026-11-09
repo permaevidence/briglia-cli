@@ -1448,7 +1448,8 @@ actor OpenRouterService {
         execution: ProviderExecutionContext? = nil,
         lane: AffinityLane,
         imageLog: TransmittedImageLog? = nil,
-        persona: PromptPersona? = nil
+        persona: PromptPersona? = nil,
+        editingRun: EditingRun? = nil
     ) async throws -> LLMResponse {
         guard execution != nil || isCustomEndpoint || !apiKey.isEmpty else {
             throw OpenRouterError.notConfigured
@@ -1458,11 +1459,20 @@ actor OpenRouterService {
             throw OpenRouterError.apiError("Model name is not configured for the selected provider. Set it in Settings.")
         }
 
-        let context = execution ?? executionContext(
-            modelOverride: modelOverride, providerOverride: providerOverride,
-            reasoningEffortOverride: reasoningEffortOverride,
-            textOnlyOverride: textOnlyOverride, lane: lane
-        )
+        // GPT_APPLY_PATCH_PLAN §3.2 (F1): a run's requests go through its
+        // editing lease. Without one (every request outside a main turn or
+        // subagent run) the context is today's and editing is `.standard`.
+        var context: ProviderExecutionContext
+        if let execution {
+            context = editingRun?.stamped(execution) ?? execution
+        } else {
+            let fresh = executionContext(
+                modelOverride: modelOverride, providerOverride: providerOverride,
+                reasoningEffortOverride: reasoningEffortOverride,
+                textOnlyOverride: textOnlyOverride, lane: lane
+            )
+            context = editingRun?.admit(fresh: fresh) ?? fresh
+        }
         var conversation = prepareConversation(
             messages: messages, imagesDirectory: imagesDirectory,
             documentsDirectory: documentsDirectory, tools: tools,
@@ -1472,16 +1482,52 @@ actor OpenRouterService {
             finalResponseInstruction: finalResponseInstruction,
             tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
             deferredMCPSummaries: deferredMCPSummaries, promptStyle: promptStyle,
-            persona: persona
+            persona: persona, editing: context.editing
         )
         conversation.imageLog = imageLog
-        let response = context.wireProtocol == .responses
-            ? try await generateResponses(conversation, context: context)
-            : try await generateChatCompletion(conversation, context: context)
+        let response: LLMResponse
+        do {
+            response = context.wireProtocol == .responses
+                ? try await generateResponses(conversation, context: context)
+                : try await generateChatCompletion(conversation, context: context)
+        } catch let rejection as GPTCustomToolRejection.Rejected where context.editing.form == .freeform {
+            // GPT_APPLY_PATCH_PLAN §5.6: the provider refused the freeform
+            // patch tool. One monotonic freeform → JSON transition for the
+            // run, recorded per route key (one notice per key), then the
+            // same logical request rebuilt in JSON form and sent once.
+            guard let editingRun else { throw rejection }
+            _ = editingRun.transitionToJSON()
+            guard editingRun.config.form == .json else { throw rejection }
+            let first = GPTPatchFormStore.shared.recordRejection(GPTPatchRoute.key(context))
+            print("[GPTPatch] freeform apply_patch refused (\(rejection.detail)); switching to the JSON form for this run")
+            StageMarkers.event("model.gpt_patch_transition", detail: rejection.detail, call: nil)
+            CacheDiagnostics.noteTransition("editing-config", lane: lane)
+            try Task.checkCancellation()
+            context = editingRun.stamped(context)
+            var rebuilt = prepareConversation(
+                messages: messages, imagesDirectory: imagesDirectory,
+                documentsDirectory: documentsDirectory, tools: tools,
+                toolResultMessages: toolResultMessages, calendarContext: calendarContext,
+                emailContext: emailContext, chunkSummaries: chunkSummaries,
+                totalChunkCount: totalChunkCount, turnStartDate: turnStartDate,
+                finalResponseInstruction: finalResponseInstruction,
+                tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
+                deferredMCPSummaries: deferredMCPSummaries, promptStyle: promptStyle,
+                persona: persona, editing: context.editing
+            )
+            rebuilt.imageLog = imageLog
+            do {
+                response = try await generateResponses(rebuilt, context: context)
+                if first { await editingRun.notify(GPTPatchRoute.transitionNotice) }
+            } catch {
+                if first { await editingRun.notify(GPTPatchRoute.transitionFailedNotice) }
+                throw error
+            }
+        }
         // Stamp each returned call with this request's provider snapshot, for
         // the missing-argument hint (0.2.63; ToolArgumentHint). In memory
         // only — no request or persistence change.
-        return ToolCallRouting.stamp(response, setup: ToolCallRouting.setup(for: context))
+        return ToolCallRouting.stamp(response, setup: ToolCallRouting.setup(for: context), editing: context.editing)
     }
 
     func executionContext(

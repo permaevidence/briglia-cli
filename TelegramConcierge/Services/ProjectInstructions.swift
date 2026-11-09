@@ -124,10 +124,19 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
     /// Detection is manifest-based (Package.swift, package.json, Cargo.toml,
     /// go.mod, Makefile, *.xcodeproj, …); AGENTS.md remains authoritative when
     /// it declares different commands.
-    func verificationPayload(toolName: String, argumentsJSON: String, resultContent: String) -> String? {
+    func verificationPayload(toolName: String, argumentsJSON: String, resultContent: String,
+                             outcome: CodexPatch.EditOutcome? = nil) -> String? {
         guard Self.editTools.contains(toolName) else { return nil }
-        guard resultContent.contains("\"success\":true") else { return nil }
-        let touched = Self.touchedPaths(toolName: toolName, argumentsJSON: argumentsJSON)
+        let touched: [String]
+        if let outcome {
+            // GPT_APPLY_PATCH_PLAN §9.1: the typed outcome decides, with
+            // the paths it actually changed; the text is never searched.
+            guard outcome.status == .applied || (outcome.status == .partial && !outcome.changed.isEmpty) else { return nil }
+            touched = outcome.changed
+        } else {
+            guard resultContent.contains("\"success\":true") else { return nil }
+            touched = Self.touchedPaths(toolName: toolName, argumentsJSON: argumentsJSON)
+        }
         guard !touched.isEmpty else { return nil }
 
         var blocks: [String] = []
@@ -333,7 +342,11 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
         }
 
         var paths: [String] = []
-        if toolName == "apply_patch" {
+        if toolName == "apply_patch", let input = obj["input"] as? String {
+            // GPT apply_patch (§9.3): the Codex parser's own view of the
+            // patch, every Update source, Move destination, Add and Delete.
+            paths = CodexPatch.patchPaths(input)
+        } else if toolName == "apply_patch" {
             if let patchText = obj["patch_text"] as? String {
                 for line in patchText.split(separator: "\n", omittingEmptySubsequences: true) {
                     for prefix in ["*** Update File: ", "*** Add File: ", "*** Delete File: ", "*** Move to: "] {

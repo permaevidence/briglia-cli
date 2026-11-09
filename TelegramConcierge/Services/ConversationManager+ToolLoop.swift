@@ -39,6 +39,13 @@ extension ConversationManager {
         if messages.count != messageCountBeforeArchiveCommit { CacheDiagnostics.noteTransition("archive-commit", lane: .main) }
         let snapshot = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+        // GPT_APPLY_PATCH_PLAN §3.2: the run's editing configuration,
+        // resolved once here from the run-start snapshot; every request of
+        // the turn is admitted through this lease.
+        let editingRun = EditingRun.start(snapshot)
+        editingRun.setNotifier { [weak self] text in try? await self?.sendText("ℹ️ " + text) }
+        mainRunEditing = editingRun
+        defer { if mainRunEditing === editingRun { mainRunEditing = nil } }
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
         defer { responsesExecution?.responsesTurn.close() }
         // Sign in with ChatGPT: this turn is a job of its captured login; a
@@ -249,7 +256,8 @@ extension ConversationManager {
         let initialDeferredSummaries = await MCPRegistry.shared.serverSummaries(for: initialDeferredServerNames)
         let initialNativeTools = AvailableTools.all(
             includeWebSearch: turnSearchService != .none,
-            hasDeferredMCPs: !initialDeferredSummaries.isEmpty
+            hasDeferredMCPs: !initialDeferredSummaries.isEmpty,
+            editing: editingRun.config
         )
         let initialToolsForRound = initialNativeTools + initialMainMcpTools
         let prePruneSystemPromptDate = currentSystemPromptTimestamp()
@@ -263,7 +271,7 @@ extension ConversationManager {
                 currentTurnInteractions: nil, tools: initialToolsForRound, calendarContext: calendarContext,
                 emailContext: emailContext, chunkSummaries: chunkSummaries, totalChunkCount: totalChunkCount,
                 currentUserMessageId: currentUserMessageId, turnStartDate: prePruneSystemPromptDate,
-                deferredMCPSummaries: initialDeferredSummaries, persona: turnPersona)
+                deferredMCPSummaries: initialDeferredSummaries, persona: turnPersona, editingRun: editingRun)
             if try await backgroundPrunePreRequest(runId: salvageRunId, inputs: bgPruneInputs, execution: responsesExecution, inline: {
                 try await self.pruneToolInteractionsIfNeeded(
                     currentUserMessageId: currentUserMessageId,
@@ -458,7 +466,8 @@ extension ConversationManager {
 
             let nativeTools = AvailableTools.all(
                 includeWebSearch: turnSearchService != .none,
-                hasDeferredMCPs: !deferredSummaries.isEmpty
+                hasDeferredMCPs: !deferredSummaries.isEmpty,
+                editing: editingRun.config
             )
             let toolsForRound = nativeTools + mainMcpTools
             lastToolsForRound = toolsForRound
@@ -525,7 +534,7 @@ extension ConversationManager {
                 images: imagesDirectory, documents: documentsDirectory, tools: toolsForRound,
                 calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
                 totalChunks: totalChunkCount, date: systemPromptDate, deferred: deferredSummaries,
-                persona: turnPersona)
+                persona: turnPersona, editing: editingRun.config)
             let scope = estimate.scope + ":" + String(activeTurnCheckpoints[salvageRunId ?? UUID()]?.generation ?? 0)
                 + ":" + String(messagesForLLM.count)
             if let previousPromptScope, previousPromptScope != scope {
@@ -569,7 +578,7 @@ extension ConversationManager {
                                 turnStartDate: systemPromptDate,
                                 deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
                                 execution: responsesExecution, lane: .main, imageLog: log,
-                                persona: turnPersona
+                                persona: turnPersona, editingRun: editingRun
                             )
                         },
                         newestUnit: { transmitted in
@@ -670,7 +679,7 @@ extension ConversationManager {
                             turnStartDate: systemPromptDate,
                             deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
                             execution: responsesExecution, lane: .main, imageLog: log,
-                            persona: turnPersona
+                            persona: turnPersona, editingRun: editingRun
                         )
                     },
                     newestUnit: { transmitted in
@@ -922,7 +931,7 @@ extension ConversationManager {
 
                 // Flag failed calls in the per-turn log (checked here, before
                 // the system-note suffix below makes the content non-JSON).
-                for result in orderedToolResults where Self.toolResultIndicatesError(result.content) {
+                for result in orderedToolResults where result.indicatesFailure(textCheck: Self.toolResultIndicatesError) {
                     if let idx = currentTurnToolLog.lastIndex(where: { $0.id == result.toolCallId }) {
                         currentTurnToolLog[idx].failed = true
                     }
@@ -1030,6 +1039,10 @@ extension ConversationManager {
                     if ownsSalvageFile(salvageRunId) { try persistResponsesSalvage(completed) }
                     toolInteractions = completed
                 } else { toolInteractions.append(interaction) }
+                // GPT_APPLY_PATCH_PLAN §7: evidence earned by this round's
+                // results is published only now that they are committed to
+                // the run's history (not for a cancelled or suppressed batch).
+                if !suppressBatch { await GPTEvidenceSettlement.publish(orderedToolResults) }
 
                 if let runID = salvageRunId {
                     activeTurnCheckpoints[runID]?.nextRoundSequence = round + 1
@@ -1045,7 +1058,7 @@ extension ConversationManager {
                         currentTurnInteractions: toolInteractions, tools: toolsForRound, calendarContext: calendarContext,
                         emailContext: emailContext, chunkSummaries: chunkSummaries, totalChunkCount: totalChunkCount,
                         currentUserMessageId: currentUserMessageId, turnStartDate: systemPromptDate,
-                        deferredMCPSummaries: deferredSummaries, persona: turnPersona)
+                        deferredMCPSummaries: deferredSummaries, persona: turnPersona, editingRun: editingRun)
                     try await backgroundPruneMidLoop(runId: salvageRunId, nextRound: round + 1, inputs: bgPruneInputs,
         execution: responsesExecution,
                         history: { messagesForLLM }, rounds: toolInteractions,
@@ -1281,7 +1294,7 @@ extension ConversationManager {
                                 tailSystemMessage: tail,
                                 deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
                                 execution: responsesExecution, lane: .main, imageLog: log,
-                                persona: turnPersona
+                                persona: turnPersona, editingRun: editingRun
                             )
                         },
                         newestUnit: { transmitted in
@@ -1379,7 +1392,7 @@ extension ConversationManager {
                             tailSystemMessage: tail,
                             deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
                             execution: responsesExecution, lane: .main, imageLog: log,
-                            persona: turnPersona
+                            persona: turnPersona, editingRun: editingRun
                         )
                     },
                     newestUnit: { transmitted in

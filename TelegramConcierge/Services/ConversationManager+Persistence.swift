@@ -808,6 +808,10 @@ extension ConversationManager {
         // conversation starts, so free search gets a new ID on first use.
         do { try ParallelSessionStore.discard() }
         catch { failures.append("Could not delete the free-search session file") }
+        // GPT patch-form rejections (GPT_APPLY_PATCH_PLAN §5.6, §11): route
+        // facts recorded while this user used Briglia; the switch survives.
+        do { try GPTPatchFormStore.shared.deleteAll() }
+        catch { failures.append("Could not delete the patch-form record (\(GPTPatchFormStore.fileURL.path))") }
         // Waiting settings changes (plan B.5): deleted (secret-bearing).
         do { try SettingsPendingStore.remove() }
         catch { failures.append("Could not delete the waiting settings changes (\(SettingsPendingStore.url.path))") }
@@ -882,7 +886,8 @@ extension ConversationManager {
         let deferredSummaries = await MCPRegistry.shared.serverSummaries(for: deferredServerNames)
         let nativeTools = AvailableTools.all(
             includeWebSearch: KeylessSearchSwitch.current() != .none,
-            hasDeferredMCPs: !deferredSummaries.isEmpty
+            hasDeferredMCPs: !deferredSummaries.isEmpty,
+            editing: await editingConfigForEstimate()
         )
         let allTools = nativeTools + mainMcpTools
 

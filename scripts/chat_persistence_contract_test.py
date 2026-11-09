@@ -17,8 +17,8 @@ class ContractTests(unittest.TestCase):
         # Exercise the current additive fallback, without editing either frozen manifest.
         with tempfile.TemporaryDirectory() as folder:
             alternate = Path(folder) / 'responses.json'
-            actual = json.loads(contract.ORPROVIDER_MANIFEST.read_text())
-            with patch.object(contract, 'ORPROVIDER_MANIFEST', alternate):
+            actual = json.loads(contract.GPT_PATCH_MANIFEST.read_text())
+            with patch.object(contract, 'GPT_PATCH_MANIFEST', alternate):
                 alternate.write_text(json.dumps(actual))
                 verify()
                 for field in ['source', 'sha256']:

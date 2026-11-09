@@ -112,6 +112,9 @@ struct ResponsesAdapter {
                 throw ResponsesFailure.malformed("duplicate exposed tool name")
             }
             body["tools"] = .array(try tools.map { tool in
+                // GPT_APPLY_PATCH_PLAN §5.2: the freeform form puts Codex's
+                // grammar tool in apply_patch's slot (verified routes only).
+                if context.editing.form == .freeform, tool.function.name == "apply_patch" { return GPTFreeform.customToolEntry() }
                 let parameters = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(tool.function.parameters))
                 return .object(["type": .string("function"), "name": .string(tool.function.name),
                     "description": .string(MarkerNeutralizer.escape(tool.function.description)),
@@ -233,7 +236,9 @@ struct ResponsesAdapter {
                     subscription: context.subscriptionGeneration != nil)
                 counts = ResponsesUsageCounts.parse(bytes)
                 try Task.checkCancellation()
-                let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed)
+                let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed,
+                                                             blockedForeignNames: Self.blockedForeignNames(context.editing, exposed: allowed),
+                                                             freeformTools: Self.freeformTools(context, exposed: allowed))
                 completed = true
                 DebugTelemetry.log(.info, summary: "Responses usage",
                     detail: "input=\(round.inputTokens.map(String.init) ?? "unknown") output=\(round.outputTokens.map(String.init) ?? "unknown") cached_input=\(round.metadata.cachedInputTokens.map(String.init) ?? "unknown") reasoning_output_subset=\(round.metadata.reasoningTokens.map(String.init) ?? "unknown")")
@@ -321,7 +326,7 @@ struct ResponsesAdapter {
     /// Returns nil for invalid/foreign optional metadata. Canonical history then
     /// supplies semantic replay; no raw persisted object is forwarded.
     static func nativeItems(envelope: ResponsesReplayEnvelope?, scope: ResponsesScope,
-                            text: String?, calls: [ToolCall]) -> [JSONValue]? {
+                            text: String?, calls: [ToolCall], freeformPatch: Bool = false) -> [JSONValue]? {
         guard let envelope, envelope.matches(scope: scope, text: text, calls: calls) else { return nil }
         let bytes = Array((text ?? "").utf8)
         var offset = 0, seenCalls = Set<Int>(), seenIDs = Set<String>(), output: [JSONValue] = []
@@ -346,6 +351,17 @@ struct ResponsesAdapter {
                 item["name"] = .string(call.function.name)
                 item["arguments"] = .string(MarkerNeutralizer.escape(call.function.arguments))
                 item["status"] = .string("completed")
+            case "custom_tool_call":
+                // GPT_APPLY_PATCH_PLAN §5.5: a native freeform call replays
+                // natively only while this request exposes the freeform
+                // apply_patch; otherwise the whole round goes semantic.
+                guard freeformPatch, let index = entry.callIndex, index >= 0, index < calls.count,
+                      seenCalls.insert(index).inserted, let input = GPTFreeform.patchInput(calls[index]) else { return nil }
+                let call = calls[index]
+                item["call_id"] = .string(call.id)
+                item["name"] = .string("apply_patch")
+                item["input"] = .string(MarkerNeutralizer.escape(input))
+                item["status"] = .string("completed")
             case "message":
                 guard let lengths = entry.textParts, let refusals = entry.refusalParts,
                       lengths.count == refusals.count else { return nil }
@@ -367,5 +383,24 @@ struct ResponsesAdapter {
         }
         guard offset == bytes.count, seenCalls.count == calls.count else { return nil }
         return output
+    }
+}
+
+extension ResponsesAdapter {
+    /// GPT_APPLY_PATCH_PLAN §10 bounded repair: the only unexposed names a
+    /// round may contain as NON-executable calls (blocked by the run with
+    /// a hint naming this model's edit tool). Every other decoder check
+    /// still applies; these names never reach an executable allowlist.
+    static func blockedForeignNames(_ editing: EditingConfig, exposed: Set<String>) -> Set<String> {
+        let foreign: Set<String> = editing.isGPT ? ["edit_file", "write_file"] : ["apply_patch"]
+        return foreign.subtracting(exposed)
+    }
+}
+
+extension ResponsesAdapter {
+    /// The names a round may return as `custom_tool_call` (§5.3): the
+    /// exposed apply_patch in a freeform request; none otherwise.
+    static func freeformTools(_ context: ProviderExecutionContext, exposed: Set<String>) -> Set<String> {
+        context.editing.form == .freeform && exposed.contains("apply_patch") ? ["apply_patch"] : []
     }
 }

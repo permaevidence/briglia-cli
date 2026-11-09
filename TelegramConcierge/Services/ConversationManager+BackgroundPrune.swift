@@ -108,7 +108,7 @@ extension ConversationManager {
             images: imagesDirectory, documents: documentsDirectory, tools: inputs.tools,
             calendar: inputs.calendarContext, email: inputs.emailContext, summaries: inputs.chunkSummaries,
             totalChunks: inputs.totalChunkCount, date: inputs.turnStartDate, deferred: inputs.deferredMCPSummaries,
-            persona: inputs.persona)
+            persona: inputs.persona, editing: inputs.editingRun?.config ?? .standard)
         let providerIsLMStudio = currentProviderIsLMStudio()
         var totalTokens: Int
         let decisionView = PruneSummaryRetention.compose(messages, limit: KeepSummariesSetting.current())
@@ -131,7 +131,7 @@ extension ConversationManager {
             images: imagesDirectory, documents: documentsDirectory, tools: inputs.tools,
             calendar: inputs.calendarContext, email: inputs.emailContext, summaries: inputs.chunkSummaries,
             totalChunks: inputs.totalChunkCount, date: inputs.turnStartDate, deferred: inputs.deferredMCPSummaries,
-            persona: inputs.persona)
+            persona: inputs.persona, editing: inputs.editingRun?.config ?? .standard)
         let providerIsLMStudio = currentProviderIsLMStudio()
         var totalTokens: Int
         let decisionView = PruneSummaryRetention.compose(history, limit: KeepSummariesSetting.current())
@@ -976,7 +976,8 @@ extension ConversationManager {
         let estimate = try await openRouterService.activeTurnRequestEstimate(messages: history, rounds: rounds,
             images: imagesDirectory, documents: documentsDirectory, tools: tools,
             calendar: calendar, email: email, summaries: summaries,
-            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona)
+            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona,
+            editing: mainRunEditing?.config ?? .standard)
         return BackgroundPruneCeiling.saturatingAdd(estimate.tokens, ActiveTurnBudget.text(tail))
     }
 
@@ -1009,7 +1010,8 @@ extension ConversationManager {
         try await openRouterService.activeTurnRequestEstimate(messages: projected, rounds: rounds,
             images: imagesDirectory, documents: documentsDirectory, tools: tools,
             calendar: calendar, email: email, summaries: summaries,
-            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona).tokens
+            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona,
+            editing: mainRunEditing?.config ?? .standard).tokens
     }
 
     func backgroundPruneMaximum() -> Int { configuredMaxContextTokens() }
@@ -1137,7 +1139,7 @@ extension ConversationManager {
                         turnStartDate: turnStartDate,
                         tailUserMessage: tail,
                         deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                        execution: summaryExecution, lane: .main, persona: persona
+                        execution: summaryExecution, lane: .main, persona: persona, editingRun: inputs.editingRun
                     )
                 } catch {
                     if isCancellation(error) { return .cancelled }
@@ -1191,7 +1193,7 @@ extension ConversationManager {
                                 turnStartDate: turnStartDate,
                                 tailUserMessage: retryTail,
                                 deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                                execution: summaryExecution, lane: .main, persona: persona
+                                execution: summaryExecution, lane: .main, persona: persona, editingRun: inputs.editingRun
                             )
                             recordPruneSummarySpend(spendUSD(from: retryResponse))
                             switch retryResponse {

@@ -75,6 +75,11 @@ struct ProviderExecutionContext {
     /// researcher's model rounds (1). nil = the standard schedule, unchanged:
     /// timing, attempt caps and every other retry are never affected.
     var silenceTimeoutRetryLimit: Int? = nil
+    /// The run's editing configuration (GPT_APPLY_PATCH_PLAN §3.2): set by
+    /// the run's `EditingRun` on every request of a main turn or subagent
+    /// run; `.standard` everywhere else. The Responses adapter reads the
+    /// patch form from it and the response stamp copies it onto each call.
+    var editing: EditingConfig = .standard
 
     var responsesScope: ResponsesScope {
         ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,

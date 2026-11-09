@@ -118,7 +118,8 @@ enum ResponsesRoundDecoder {
     /// A completed round with neither text nor calls (an empty reply).
     static let noVisibleAnswer = "no visible answer or calls"
     static func decode(_ data: Data, scope: ResponsesScope, receipt: PreparedRequestReceipt,
-                       allowedTools: Set<String>, requiredNamespace: String? = nil) throws -> ResponsesRound {
+                       allowedTools: Set<String>, requiredNamespace: String? = nil,
+                       blockedForeignNames: Set<String> = [], freeformTools: Set<String> = []) throws -> ResponsesRound {
         guard data.count <= ResponsesLimits.roundBytes else { throw ResponsesFailure.overflow }
         let root = try JSONDecoder().decode(JSONValue.self, from: data)
         guard let object = root.responsesObject,
@@ -185,7 +186,8 @@ enum ResponsesRoundDecoder {
             case "function_call":
                 guard let callID = item["call_id"]?.responsesString, !callID.isEmpty,
                       callIDs.insert(callID).inserted,
-                      let name = item["name"]?.responsesString, allowedTools.contains(name),
+                      let name = item["name"]?.responsesString,
+                      allowedTools.contains(name) || blockedForeignNames.contains(name),
                       let arguments = item["arguments"]?.responsesString else {
                     throw ResponsesFailure.malformed("duplicate/missing call identity or unexposed tool")
                 }
@@ -199,6 +201,22 @@ enum ResponsesRoundDecoder {
                 guard (try? JSONDecoder().decode(JSONValue.self, from: Data(arguments.utf8)))?.responsesObject != nil else {
                     throw ResponsesFailure.malformed("tool arguments must be a complete JSON object")
                 }
+                entries.append(.init(type: type, id: id, callIndex: calls.count, encryptedContent: nil,
+                    summary: nil, textParts: nil, refusalParts: nil))
+                calls.append(ToolCall(id: callID, type: "function", function: .init(name: name, arguments: arguments)))
+            case "custom_tool_call":
+                // GPT_APPLY_PATCH_PLAN §5.3: only the exposed freeform
+                // apply_patch; stored function-shaped as canonical
+                // {"input": …}, replay entry type custom_tool_call.
+                guard requiredNamespace == nil, let callID = item["call_id"]?.responsesString, !callID.isEmpty,
+                      callIDs.insert(callID).inserted,
+                      let name = item["name"]?.responsesString, allowedTools.contains(name), freeformTools.contains(name),
+                      let input = item["input"]?.responsesString else {
+                    throw ResponsesFailure.malformed("custom tool call: unexposed tool, duplicate identity or missing input")
+                }
+                guard input.utf8.count <= ResponsesLimits.argumentBytes,
+                      let arguments = GPTFreeform.canonicalArguments(input),
+                      arguments.utf8.count <= ResponsesLimits.argumentBytes else { throw ResponsesFailure.overflow }
                 entries.append(.init(type: type, id: id, callIndex: calls.count, encryptedContent: nil,
                     summary: nil, textParts: nil, refusalParts: nil))
                 calls.append(ToolCall(id: callID, type: "function", function: .init(name: name, arguments: arguments)))

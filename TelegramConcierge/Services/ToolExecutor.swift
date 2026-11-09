@@ -208,6 +208,9 @@ actor ToolExecutor {
     // MARK: - Bash wait policy (BASH_V2_PLAN §9)
 
     private var bashWaitLedger = BashWaitLedger()
+    /// Last absolute `workdir` a GPT run used with bash (the apply_patch
+    /// relative-path hint, GPT_APPLY_PATCH_PLAN D2).
+    var gptLastWorkdir: String?
     /// Admissions preflighted for the current tool round, keyed by call id.
     private var pendingWaitAdmissions: [String: BashWaitLedger.Admission] = [:]
 
@@ -421,7 +424,17 @@ actor ToolExecutor {
     nonisolated(unsafe) static var toolBodyHoldForTesting: (@Sendable (String) -> Void)?
 
     /// Execute a single tool call and return the result
-    func execute(_ call: ToolCall, acquireToken: StageMarkers.Token? = nil) async throws -> ToolResultMessage {
+    func execute(_ originalCall: ToolCall, acquireToken: StageMarkers.Token? = nil) async throws -> ToolResultMessage {
+        // GPT_APPLY_PATCH_PLAN §8: a GPT-stamped bash call that is exactly an
+        // apply_patch heredoc runs as its effective call everywhere below
+        // (claims, checkpoint, instructions, verification, executor, typed
+        // outcome); the persisted call stays the bash call.
+        let intercepted = GPTShellIntercept.effectiveCall(originalCall)
+        let call = intercepted ?? originalCall
+        if intercepted != nil {
+            StageMarkers.event("bash.apply_patch_intercept", detail: nil, call: nil)
+            if let wd = GPTShellIntercept.patchBody(command: Self.bashCommand(originalCall) ?? "")?.cdPath { gptLastWorkdir = wd }
+        }
         // Stage markers (diagnostics only; never change behaviour): the
         // executor actor was acquired, then every stage of the call.
         let markerContext = StageMarkers.CallContext(callId: call.id, tool: call.function.name, depth: depth)
@@ -430,7 +443,9 @@ actor ToolExecutor {
             let toolToken = StageMarkers.enter("tool.execute")
             do {
                 let result = try await executeMarked(call)
-                StageMarkers.exit(toolToken, result.content.contains("\"error\"") ? .error : .ok)
+                // §9.1: a GPT patch is classified from its typed outcome.
+                let failed = result.indicatesFailure { $0.contains("\"error\"") }
+                StageMarkers.exit(toolToken, failed ? .error : .ok)
                 return result
             } catch {
                 StageMarkers.exit(toolToken, error is CancellationError || Task.isCancelled ? .cancelled : .error)
@@ -456,11 +471,12 @@ actor ToolExecutor {
             result = try await executeMarkedBody(call)
         } catch {
             _ = await MultiAssistantHooks.after(toolName: call.function.name, argumentsJSON: call.function.arguments,
-                                                resultContent: "{\"error\": \"cancelled\"}", pending: multi)
+                                                resultContent: "{\"error\": \"cancelled\"}", pending: multi,
+                                                outcome: GPTPatchSettlement.shared.outcome(call.id))
             throw error
         }
         result.content += await MultiAssistantHooks.after(toolName: call.function.name, argumentsJSON: call.function.arguments,
-                                                          resultContent: result.content, pending: multi)
+                                                          resultContent: result.content, pending: multi, outcome: result.editOutcome)
         return result
     }
 
@@ -518,7 +534,8 @@ actor ToolExecutor {
                 self.projectInstructions.verificationPayload(
                     toolName: call.function.name,
                     argumentsJSON: call.function.arguments,
-                    resultContent: result.content
+                    resultContent: result.content,
+                    outcome: result.editOutcome
                 )
             }
             let buildToken = StageMarkers.enter("result.build")
@@ -549,7 +566,7 @@ actor ToolExecutor {
         do {
             let result = try await body()
             let ms = Int(Date().timeIntervalSince(started) * 1000)
-            let isError = result.content.contains("\"error\"")
+            let isError = result.indicatesFailure { $0.contains("\"error\"") }
             DebugTelemetry.log(
                 isError ? .toolError : .toolEnd,
                 summary: "\(call.function.name) (\(ms)ms)",
@@ -602,6 +619,19 @@ actor ToolExecutor {
     /// Internal dispatch body (formerly the body of `execute`). Kept separate so
     /// `withTelemetry` can wrap the whole thing uniformly.
     private func executeBody(_ call: ToolCall) async throws -> ToolResultMessage {
+        // GPT_APPLY_PATCH_PLAN §3.4: apply_patch dispatches on the call's
+        // editing stamp, never on its argument shape. `.gpt` → the Codex
+        // engine; `.standard` → the legacy executor below (only reachable
+        // with the hidden legacy preference); no stamp → fail closed.
+        if call.function.name == "apply_patch" {
+            guard let editing = call.editing else {
+                return ToolResultMessage(toolCallId: call.id, content: Self.unstampedPatchRefusal)
+            }
+            if editing.isGPT { return await executeGPTApplyPatch(call) }
+        }
+        if call.function.name == "bash", call.editing?.isGPT == true {
+            return await executeGPTBash(call)
+        }
         // Special cases for tools that return ToolResultMessage with file attachment for multimodal injection
         switch call.function.name {
         case "read_file":
@@ -715,7 +745,9 @@ actor ToolExecutor {
     /// Execute multiple tool calls in parallel
     func executeParallel(_ calls: [ToolCall]) async throws -> [ToolResultMessage] {
         try Task.checkCancellation()
-        preflightBashWaits(calls)
+        // An intercepted apply_patch heredoc (GPT_APPLY_PATCH_PLAN §8) is a
+        // patch, not a bash job: it never reserves wait time.
+        preflightBashWaits(calls.filter { GPTShellIntercept.effectiveCall($0) == nil })
         // Only depth-0 main-executor calls can be woken by a mid-turn user
         // message (§3.1): the scope is captured once, now, for this batch.
         let wakeScope = (depth == 0 && outputMode == .mainAgent) ? wakeTurn : nil

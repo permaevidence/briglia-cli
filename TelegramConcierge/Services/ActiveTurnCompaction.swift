@@ -217,13 +217,13 @@ extension OpenRouterService {
         images: URL, documents: URL, tools: [ToolDefinition], calendar: String?, email: String?,
         summaries: [ArchivedSummaryItem], totalChunks: Int, date: Date,
         deferred: [(name: String, description: String, toolCount: Int)],
-        persona: PromptPersona? = nil) throws -> (tokens: Int, fixedTextTokens: Int, scope: String) {
+        persona: PromptPersona? = nil, editing: EditingConfig = .standard) throws -> (tokens: Int, fixedTextTokens: Int, scope: String) {
         let prepared = prepareConversation(messages: messages, imagesDirectory: images,
             documentsDirectory: documents, tools: tools, toolResultMessages: rounds,
             calendarContext: calendar, emailContext: email, chunkSummaries: summaries,
             totalChunkCount: totalChunks, turnStartDate: date, finalResponseInstruction: nil,
             tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: deferred,
-            persona: persona)
+            persona: persona, editing: editing)
         Self.estimateSystemPromptObserverForTesting?(prepared.systemPrompt)
         // Sorted keys: tool definitions are rebuilt every round and their
         // dictionaries iterate in a per-instance order, so unsorted bytes

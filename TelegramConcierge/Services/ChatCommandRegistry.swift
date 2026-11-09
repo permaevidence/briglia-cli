@@ -49,6 +49,8 @@ enum ChatCommandRegistry {
                     usage: "[on|off]", inMenu: false, category: "Models"),
         ChatCommand(name: "freesearch", description: "Free web search without a Serper.dev key (Parallel): on (default), off, or reset (back to the default; repairs a damaged search session file). A search switch only; a Serper key always takes over",
                     usage: "[on|off|reset]", inMenu: false, category: "Models"),
+        ChatCommand(name: "gptpatch", description: "GPT models edit files with Codex's apply_patch (on, default) or with edit_file/write_file like other models (off); status shows the current model's edit tool. Applies from the next request",
+                    usage: "[on|off|status]", inMenu: false, category: "Models"),
         ChatCommand(name: "archiveinline", description: "Wait for memory archiving before replying (on), or archive in the background (off, default)",
                     usage: "[on|off]", inMenu: false, category: "System"),
                     // BGPRUNE{ A-REG

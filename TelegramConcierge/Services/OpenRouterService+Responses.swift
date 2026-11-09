@@ -37,6 +37,12 @@ extension OpenRouterService {
             print("[Responses] Native replay cache bound: older complete rounds use canonical semantic replay")
         }
         CacheDiagnostics.noteNativeReplayEviction(historical.count - nativeHistory.count, context: context)
+        // GPT_APPLY_PATCH_PLAN §5.4–5.5: whether this request exposes the
+        // freeform apply_patch, and which call ids were rendered as custom
+        // items (their outputs become custom_tool_call_output).
+        let freeformPatch = context.editing.form == .freeform
+            && (conversation.tools ?? []).contains { $0.function.name == "apply_patch" }
+        var customCallIDs = Set<String>()
 
         func appendRound(_ interaction: ToolInteraction, identity: String, owner: UUID?) async throws {
             let assistant = interaction.assistantMessage
@@ -52,7 +58,7 @@ extension OpenRouterService {
                 input.append(ResponsesAdapter.message(role: "system", text: chronology.issuedNote(at: issuedAt)))
             }
             var native = ResponsesAdapter.nativeItems(envelope: identity.hasPrefix("current:") || nativeHistory.contains(identity) ? assistant.responsesReplay : nil,
-                scope: context.responsesScope, text: assistant.content, calls: calls)
+                scope: context.responsesScope, text: assistant.content, calls: calls, freeformPatch: freeformPatch)
             if !usedCallIDs.isDisjoint(with: calls.map(\.id)) { native = nil }
             let itemIDs = native?.compactMap { $0.responsesObject?["id"]?.responsesString } ?? []
             if !usedItemIDs.isDisjoint(with: itemIDs) { native = nil }
@@ -61,6 +67,9 @@ extension OpenRouterService {
                 usedItemIDs.formUnion(itemIDs)
                 input.append(contentsOf: native)
                 for call in calls { mapped[call.id] = call.id; usedCallIDs.insert(call.id) }
+                for item in native where item.responsesObject?["type"]?.responsesString == "custom_tool_call" {
+                    if let id = item.responsesObject?["call_id"]?.responsesString { customCallIDs.insert(id) }
+                }
                 replayBytes += assistant.responsesReplay?.byteCount ?? 0
             } else {
                 if assistant.responsesReplay != nil { print("[Responses] Replaying incompatible/edited round semantically; native reasoning omitted") }
@@ -75,6 +84,14 @@ extension OpenRouterService {
                     let id = "call_" + String(ResponsesReplayEnvelope.hash(Data("\(identity):\(index):\(call.id)".utf8)).prefix(40))
                     guard usedCallIDs.insert(id).inserted else { throw ResponsesFailure.malformed("replay call collision") }
                     mapped[call.id] = id
+                    if freeformPatch, let patch = GPTFreeform.patchInput(call) {
+                        // §5.5 semantic replay: an {"input"} apply_patch call
+                        // renders as a custom item while freeform is exposed.
+                        customCallIDs.insert(id)
+                        input.append(.object(["type": .string("custom_tool_call"), "call_id": .string(id),
+                            "name": .string("apply_patch"), "input": .string(MarkerNeutralizer.escape(patch))]))
+                        continue
+                    }
                     input.append(.object(["type": .string("function_call"), "call_id": .string(id),
                         "name": .string(call.function.name), "arguments": .string(MarkerNeutralizer.escape(call.function.arguments))]))
                 }
@@ -109,6 +126,18 @@ extension OpenRouterService {
                     if let notes = restored.notesPart { parts.append(notes) }
                 }
                 let media = try await responsesMedia(parts, textOnly: context.textOnly)
+                if customCallIDs.contains(mapped[result.toolCallId]!) {
+                    // §5.4: the output type follows the rendered call item;
+                    // a custom call's output is a string.
+                    input.append(.object(["type": .string("custom_tool_call_output"),
+                        "call_id": .string(mapped[result.toolCallId]!), "output": .string(text)]))
+                    if !media.isEmpty {
+                        input.append(.object(["role": .string("user"), "content": .array([
+                            .object(["type": .string("input_text"), "text": .string("[Synthetic tool observation — not a user message. Media from tool call \(mapped[result.toolCallId]!).]")])
+                        ] + media)]))
+                    }
+                    continue
+                }
                 var output: [JSONValue] = [.object(["type": .string("input_text"), "text": .string(text)])]
                 if context.nativeToolMedia { output += media }
                 input.append(.object(["type": .string("function_call_output"),

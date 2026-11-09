@@ -92,7 +92,12 @@ extension ConversationManager {
 
 
     private func blockedToolResult(for call: ToolCall) -> ToolResultMessage {
-        blockedToolResult(for: call, errorMessage: "Tool '\(call.function.name)' is not available in this turn.")
+        // GPT_APPLY_PATCH_PLAN §10: a foreign-profile edit call (from
+        // history of another model) names this model's edit tool instead.
+        if let hint = GPTForeignCall.message(name: call.function.name, editing: call.editing ?? .standard) {
+            return blockedToolResult(for: call, errorMessage: hint)
+        }
+        return blockedToolResult(for: call, errorMessage: "Tool '\(call.function.name)' is not available in this turn.")
     }
 
     private func blockedToolResult(for call: ToolCall, errorMessage: String) -> ToolResultMessage {

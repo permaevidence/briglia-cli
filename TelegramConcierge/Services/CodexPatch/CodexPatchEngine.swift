@@ -499,8 +499,16 @@ extension CodexPatch {
             }
         }
         let text = successText(added: added, modified: modified, deleted: deleted, notes: notes)
-        return Result(text: text, outcome: EditOutcome(status: .applied, changed: changed),
-                      writtenFiles: written, evidence: evidence, forget: forget)
+        var result = Result(text: text, outcome: EditOutcome(status: .applied, changed: changed),
+                            writtenFiles: written, evidence: evidence, forget: forget)
+        result.addedPaths = added
+        for op in ops {
+            switch op {
+            case .move(_, let r), .delete(let r): result.removedPaths.append(r.display)
+            default: break
+            }
+        }
+        return result
     }
 
     /// Publishes a delivered result's evidence (§7): a receipt is published
@@ -512,5 +520,22 @@ extension CodexPatch {
             guard let now = try? FileIdentity.lstatPath(receipt.key), now.sameState(as: receipt.identity) else { continue }
             await FileTimeTracker.shared.publishGPT(receipt)
         }
+    }
+}
+
+extension CodexPatch {
+    /// Every path a patch names (Update sources, Move destinations, Adds,
+    /// Deletes), parsed exactly as `apply` parses it, absolute ones only
+    /// (trimmed, `~` expanded); [] for an unparsable patch (GPT_APPLY_PATCH_PLAN
+    /// §9.2, §9.3: claims, checkpoint, project instructions).
+    static func patchPaths(_ input: String) -> [String] {
+        guard input.utf8.count <= Limits.standard.maxInputBytes, let args = try? parsePatch(input) else { return [] }
+        var raw: [String] = []
+        for hunk in args.hunks {
+            raw.append(hunk.path)
+            if let move = hunk.movePath { raw.append(move) }
+        }
+        var seen = Set<String>()
+        return raw.map(normalizePath).filter { $0.hasPrefix("/") && seen.insert($0).inserted }
     }
 }

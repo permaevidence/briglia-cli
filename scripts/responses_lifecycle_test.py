@@ -112,7 +112,12 @@ def main():
         binarydir = subprocess.check_output(['swift', 'build', '--scratch-path', str(scratch), '--show-bin-path'], cwd=tree, text=True).strip()
         binary = Path(binarydir) / 'briglia'
         print('Instrumented binary: ' + str(binary), flush=True)
-        wire.command([str(binary), '__responses-lifecycle-selftest', '--output', str(root / 'fixtures')], cwd=tree, timeout=180)
+        # GPT_APPLY_PATCH_PLAN I1: the driver's model (gpt-5.6-luna) is
+        # GPT-eligible; its frozen requests are the standard surface, so the
+        # GPT editing profile is pinned off here (the profile's own wire
+        # checks live in __gpt-profile-selftest).
+        wire.command([str(binary), '__responses-lifecycle-selftest', '--output', str(root / 'fixtures')], cwd=tree, timeout=180,
+                     env=dict(os.environ, BRIGLIA_GPT_PATCH='0'))
         print('Responses real-owner lifecycle PASS', flush=True)
     finally:
         if args.keep_tree:

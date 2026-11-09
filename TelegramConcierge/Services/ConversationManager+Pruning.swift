@@ -969,7 +969,8 @@ extension ConversationManager {
         let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projection,
             rounds: checkpoint.retainedInteractions, images: imagesDirectory, documents: documentsDirectory,
             tools: tools, calendar: calendar, email: email, summaries: summaries,
-            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona)
+            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona,
+            editing: mainRunEditing?.config ?? .standard)
         latestEstimateScope = estimate.scope
         return Int(ceil(Double(estimate.tokens) * (promptEstimateCorrections[estimate.scope] ?? 1)))
     }

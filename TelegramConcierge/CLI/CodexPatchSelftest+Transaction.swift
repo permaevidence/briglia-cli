@@ -408,6 +408,44 @@ extension CodexPatchSelftest {
                 unlink(staged.tempPath)
             } else { t.check("T.23 fixture", false) }
         }
+        // Codex S1 round 4 (non-blocking test note): rollback's direct
+        // `.temp` branch and the created-directory branch, inspection failure
+        // versus verified absence.
+        do {
+            let d = t.dir("rs6")
+            let journal = CodexPatchTransaction.Journal()
+            if let staged = try? CodexPatchTransaction.stage(Data("x".utf8), forTarget: d + "/g.txt", finalMode: 0o600, journal: journal) {
+                chmod(d, 0o400)
+                let report = await CodexPatchTransaction.rollback(journal)
+                chmod(d, 0o700)
+                t.check("T.24 rollback's .temp branch names a temp it cannot inspect (never unlinks it)",
+                        getuid() == 0 || (report.leftoverTemps == [staged.tempPath] && t.exists(staged.tempPath)),
+                        "report \(report.leftoverTemps) exists \(t.exists(staged.tempPath))")
+                unlink(staged.tempPath)
+            } else { t.check("T.24 fixture", false) }
+        }
+        do {
+            let d = t.dir("rs7")
+            let child = d + "/made/deeper"
+            let journal = CodexPatchTransaction.Journal()
+            if (try? CodexPatchTransaction.ensureParent(of: child + "/f.txt", inScope: false, journal: journal)) != nil {
+                let created = journal.receipts.compactMap { r -> String? in if case .createdDirectory(let p, _, _, _) = r { return p }; return nil }
+                // Inspection failure: the parent of the created directories
+                // becomes unsearchable — reported as a conflict, kept.
+                chmod(d, 0o400)
+                let blocked = await CodexPatchTransaction.rollback(journal)
+                chmod(d, 0o700)
+                t.check("T.25 created directory that cannot be inspected is a conflict and is kept",
+                        getuid() == 0 || (!created.isEmpty && created.allSatisfy { blocked.conflicts.contains($0) }
+                                          && FileManager.default.fileExists(atPath: child)),
+                        "created \(created) conflicts \(blocked.conflicts)")
+                // Verified absence: someone removed them; nothing to undo.
+                try? FileManager.default.removeItem(atPath: d + "/made")
+                let absent = await CodexPatchTransaction.rollback(journal)
+                t.check("T.25 verified absence of a created directory is no conflict",
+                        absent.conflicts.isEmpty, "conflicts \(absent.conflicts)")
+            } else { t.check("T.25 fixture", false) }
+        }
     }
 
     final class HitFlag: @unchecked Sendable {

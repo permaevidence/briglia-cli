@@ -79,6 +79,9 @@ struct BackgroundPruneSummaryInputs {
     let deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]
     let persona: PromptPersona?
     var execution: ProviderExecutionContext? = nil
+    /// The turn's editing lease (GPT_APPLY_PATCH_PLAN §3.2), so the summary
+    /// request carries the same tool surface and prompt as the turn.
+    var editingRun: EditingRun? = nil
 }
 
 /// Values captured before the freeze's first await (§5 step 1).
