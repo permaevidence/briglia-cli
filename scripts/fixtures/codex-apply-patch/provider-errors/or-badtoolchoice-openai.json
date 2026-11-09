@@ -1,0 +1,73 @@
+{
+ "captured": "2026-11-09",
+ "route": "openrouter",
+ "endpoint": "https://openrouter.ai/api/v1/responses",
+ "status": 400,
+ "content_type": "application/json",
+ "expect_classified": false,
+ "note": "Contrast: OpenRouter validation, tool_choice names an unknown custom tool (Zod path ['tool_choice']).",
+ "request": {
+  "model": "openai/gpt-6-luna",
+  "input": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "Create the file /tmp/x/hello.txt containing the single line `hello` using the apply_patch tool. Call the tool now; do not explain."
+     }
+    ]
+   }
+  ],
+  "store": false,
+  "stream": true,
+  "truncation": "disabled",
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 400,
+  "tools": [
+   {
+    "type": "function",
+    "name": "read_file",
+    "description": "Read a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    },
+    "strict": false
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+   }
+  ],
+  "reasoning": {
+   "effort": "low"
+  },
+  "tool_choice": {
+   "type": "custom",
+   "name": "no_such_tool"
+  },
+  "provider": {
+   "only": [
+    "openai"
+   ],
+   "allow_fallbacks": false
+  }
+ },
+ "body": "{\"error\":{\"code\":\"invalid_prompt\",\"message\":\"Invalid Responses API request\"},\"metadata\":{\"raw\":\"[\\n  {\\n    \\\"code\\\": \\\"invalid_union\\\",\\n    \\\"errors\\\": [\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"auto\\\"\\n          ],\\n          \\\"path\\\": [],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"auto\\\\\\\"\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"none\\\"\\n          ],\\n          \\\"path\\\": [],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"none\\\\\\\"\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"required\\\"\\n          ],\\n          \\\"path\\\": [],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"required\\\\\\\"\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"function\\\"\\n          ],\\n          \\\"path\\\": [\\n            \\\"type\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"function\\\\\\\"\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_union\\\",\\n          \\\"errors\\\": [\\n            [\\n              {\\n                \\\"code\\\": \\\"invalid_value\\\",\\n                \\\"values\\\": [\\n                  \\\"web_search_preview_2025_03_11\\\"\\n                ],\\n                \\\"path\\\": [],\\n                \\\"message\\\": \\\"Invalid input: expected \\\\\\\"web_search_preview_2025_03_11\\\\\\\"\\\"\\n              }\\n            ],\\n            [\\n              {\\n                \\\"code\\\": \\\"invalid_value\\\",\\n                \\\"values\\\": [\\n                  \\\"web_search_preview\\\"\\n                ],\\n                \\\"path\\\": [],\\n                \\\"message\\\": \\\"Invalid input: expected \\\\\\\"web_search_preview\\\\\\\"\\\"\\n              }\\n            ]\\n          ],\\n          \\\"path\\\": [\\n            \\\"type\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"allowed_tools\\\"\\n          ],\\n          \\\"path\\\": [\\n            \\\"type\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"allowed_tools\\\\\\\"\\\"\\n        },\\n        {\\n          \\\"code\\\": \\\"invalid_union\\\",\\n          \\\"errors\\\": [\\n            [\\n              {\\n                \\\"code\\\": \\\"invalid_value\\\",\\n                \\\"values\\\": [\\n                  \\\"auto\\\"\\n                ],\\n                \\\"path\\\": [],\\n                \\\"message\\\": \\\"Invalid input: expected \\\\\\\"auto\\\\\\\"\\\"\\n              }\\n            ],\\n            [\\n              {\\n                \\\"code\\\": \\\"invalid_value\\\",\\n                \\\"values\\\": [\\n                  \\\"required\\\"\\n                ],\\n                \\\"path\\\": [],\\n                \\\"message\\\": \\\"Invalid input: expected \\\\\\\"required\\\\\\\"\\\"\\n              }\\n            ]\\n          ],\\n          \\\"path\\\": [\\n            \\\"mode\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input\\\"\\n        },\\n        {\\n          \\\"expected\\\": \\\"array\\\",\\n          \\\"code\\\": \\\"invalid_type\\\",\\n          \\\"path\\\": [\\n            \\\"tools\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected array, received undefined\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"apply_patch\\\"\\n          ],\\n          \\\"path\\\": [\\n            \\\"type\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"apply_patch\\\\\\\"\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"shell\\\"\\n          ],\\n          \\\"path\\\": [\\n            \\\"type\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"shell\\\\\\\"\\\"\\n        }\\n      ],\\n      [\\n        {\\n          \\\"code\\\": \\\"invalid_value\\\",\\n          \\\"values\\\": [\\n            \\\"mcp\\\"\\n          ],\\n          \\\"path\\\": [\\n            \\\"type\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected \\\\\\\"mcp\\\\\\\"\\\"\\n        },\\n        {\\n          \\\"expected\\\": \\\"string\\\",\\n          \\\"code\\\": \\\"invalid_type\\\",\\n          \\\"path\\\": [\\n            \\\"server_label\\\"\\n          ],\\n          \\\"message\\\": \\\"Invalid input: expected string, received undefined\\\"\\n        }\\n      ]\\n    ],\\n    \\\"path\\\": [\\n      \\\"tool_choice\\\"\\n    ],\\n    \\\"message\\\": \\\"Invalid input\\\"\\n  }\\n]\"}}"
+}

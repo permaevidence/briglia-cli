@@ -1,0 +1,69 @@
+{
+ "captured": "2026-11-09",
+ "route": "openrouter",
+ "endpoint": "https://openrouter.ai/api/v1/responses",
+ "status": 200,
+ "content_type": "text/event-stream",
+ "expect_classified": false,
+ "note": "Contrast/gap: Bedrock answered the invalid grammar with HTTP 200 + SSE response.failed 'Provider returned an empty response' (server_error).",
+ "request": {
+  "model": "openai/gpt-6-luna",
+  "input": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "Create the file /tmp/x/hello.txt containing the single line `hello` using the apply_patch tool. Call the tool now; do not explain."
+     }
+    ]
+   }
+  ],
+  "store": false,
+  "stream": true,
+  "truncation": "disabled",
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 400,
+  "tools": [
+   {
+    "type": "function",
+    "name": "read_file",
+    "description": "Read a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    },
+    "strict": false
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: ((( unbalanced\n"
+    }
+   }
+  ],
+  "reasoning": {
+   "effort": "low"
+  },
+  "provider": {
+   "only": [
+    "amazon-bedrock"
+   ],
+   "allow_fallbacks": false
+  }
+ },
+ "body": "data: {\"type\":\"response.created\",\"response\":{\"id\":\"gen-REDACTED\",\"object\":\"response\",\"created_at\":1794253304,\"model\":\"openai/gpt-6-luna\",\"status\":\"in_progress\",\"completed_at\":null,\"output\":[],\"error\":null,\"incomplete_details\":null,\"access_programs\":null,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file.\",\"strict\":false,\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.\",\"format\":{\"type\":\"grammar\",\"definition\":\"start: ((( unbalanced\\n\",\"syntax\":\"lark\"}}],\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"max_output_tokens\":400,\"temperature\":1,\"top_p\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"top_logprobs\":0,\"max_tool_calls\":null,\"metadata\":{},\"background\":false,\"previous_response_id\":null,\"service_tier\":\"auto\",\"truncation\":\"disabled\",\"store\":false,\"instructions\":null,\"text\":{\"format\":{\"type\":\"text\"}},\"reasoning\":{\"effort\":\"low\"},\"safety_identifier\":null,\"prompt_cache_key\":null,\"prompt_cache_options\":null,\"usage\":null},\"sequence_number\":0}\n\ndata: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"gen-REDACTED\",\"object\":\"response\",\"created_at\":1794253304,\"model\":\"openai/gpt-6-luna\",\"status\":\"in_progress\",\"completed_at\":null,\"output\":[],\"error\":null,\"incomplete_details\":null,\"access_programs\":null,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file.\",\"strict\":false,\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.\",\"format\":{\"type\":\"grammar\",\"definition\":\"start: ((( unbalanced\\n\",\"syntax\":\"lark\"}}],\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"max_output_tokens\":400,\"temperature\":1,\"top_p\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"top_logprobs\":0,\"max_tool_calls\":null,\"metadata\":{},\"background\":false,\"previous_response_id\":null,\"service_tier\":\"auto\",\"truncation\":\"disabled\",\"store\":false,\"instructions\":null,\"text\":{\"format\":{\"type\":\"text\"}},\"reasoning\":{\"effort\":\"low\"},\"safety_identifier\":null,\"prompt_cache_key\":null,\"prompt_cache_options\":null,\"usage\":null},\"sequence_number\":1}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"gen-REDACTED\",\"object\":\"response\",\"created_at\":1794253304,\"model\":\"openai/gpt-6-luna\",\"status\":\"failed\",\"completed_at\":1794253304,\"output\":[],\"error\":{\"code\":\"server_error\",\"message\":\"Provider returned an empty response\"},\"incomplete_details\":null,\"access_programs\":null,\"tools\":[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file.\",\"strict\":false,\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.\",\"format\":{\"type\":\"grammar\",\"definition\":\"start: ((( unbalanced\\n\",\"syntax\":\"lark\"}}],\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"max_output_tokens\":400,\"temperature\":1,\"top_p\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"top_logprobs\":0,\"max_tool_calls\":null,\"metadata\":{},\"background\":false,\"previous_response_id\":null,\"service_tier\":\"auto\",\"truncation\":\"disabled\",\"store\":false,\"instructions\":null,\"text\":{\"format\":{\"type\":\"text\"}},\"reasoning\":{\"effort\":\"low\"},\"safety_identifier\":null,\"prompt_cache_key\":null,\"prompt_cache_options\":null,\"usage\":null,\"error_type\":\"provider_unavailable\"},\"sequence_number\":2}\n\ndata: [DONE]\n\n"
+}

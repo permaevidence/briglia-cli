@@ -1,0 +1,61 @@
+{
+ "captured": "2026-11-09",
+ "route": "openrouter",
+ "endpoint": "https://openrouter.ai/api/v1/responses",
+ "status": 400,
+ "content_type": "application/json",
+ "expect_classified": false,
+ "note": "Contrast: OpenAI refuses ANOTHER tool's (function read_file) parameters schema: param 'tools[0].parameters'.",
+ "request": {
+  "model": "openai/gpt-6-luna",
+  "input": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "Create the file /tmp/x/hello.txt containing the single line `hello` using the apply_patch tool. Call the tool now; do not explain."
+     }
+    ]
+   }
+  ],
+  "store": false,
+  "stream": true,
+  "truncation": "disabled",
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 400,
+  "tools": [
+   {
+    "type": "function",
+    "name": "read_file",
+    "description": "Read.",
+    "parameters": {
+     "type": "string"
+    },
+    "strict": false
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+   }
+  ],
+  "reasoning": {
+   "effort": "low"
+  },
+  "provider": {
+   "only": [
+    "openai"
+   ],
+   "allow_fallbacks": false
+  }
+ },
+ "body": "{\"error\":{\"message\":\"Provider returned error\",\"code\":400,\"metadata\":{\"raw\":\"{\\n  \\\"error\\\": {\\n    \\\"message\\\": \\\"Invalid schema for function 'read_file': schema must be a JSON Schema of 'type: \\\\\\\"object\\\\\\\"', got 'type: \\\\\\\"string\\\\\\\"'.\\\",\\n    \\\"type\\\": \\\"invalid_request_error\\\",\\n    \\\"param\\\": \\\"tools[0].parameters\\\",\\n    \\\"code\\\": \\\"invalid_function_parameters\\\"\\n  }\\n}\",\"provider_name\":\"OpenAI\",\"is_byok\":true,\"provider_error_code\":\"invalid_function_parameters\"}},\"user_id\":\"user_REDACTED\"}"
+}

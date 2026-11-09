@@ -41,10 +41,22 @@ enum GPTFreeform {
 ///   format), with a code from `refusalCodes`; or
 /// - `param` is the whole entry `tools[k]` with a type-specific code from
 ///   `typeCodes`.
-/// Errors about the entry's name, description or any other field, generic
-/// `tools` errors, other tools' errors and history/namespace errors never
-/// classify. OpenRouter may wrap the upstream body in
-/// `error.metadata.raw`; both shapes are read.
+/// Errors about the entry's name, description or any other field, other
+/// tools' errors and history/namespace errors never classify. OpenRouter may
+/// wrap the upstream body in `error.metadata.raw`; both shapes are read.
+///
+/// Real refusals captured live on 2026-11-09 (fixtures
+/// scripts/fixtures/codex-apply-patch/provider-errors/) add two shapes:
+/// - OpenAI names the whole array: `param` exactly `tools`, and either a
+///   code from `refusalCodes` with a message naming the `'custom'` type
+///   ("Invalid value: 'custom'", unknown_parameter: a model without custom
+///   tools) or a message starting "Invalid lark grammar" (code null: the
+///   host refused the entry's grammar). Any other `tools` error never
+///   classifies.
+/// - OpenRouter's own request validation: `error.code` `invalid_prompt` with
+///   a top-level `metadata.raw` JSON array of validation issues, one of
+///   them at path exactly `["tools", k]` for a custom entry k. Issues at any
+///   other path (input, reasoning, tool_choice, other tools) never classify.
 enum GPTCustomToolRejection {
     struct Rejected: Error, LocalizedError {
         let status: Int
@@ -95,6 +107,31 @@ enum GPTCustomToolRejection {
                 }
             }
         }
+        for error in errorObjects(rawBody) {
+            guard error["param"] as? String == "tools", let message = error["message"] as? String else { continue }
+            if let code = error["code"] as? String, refusalCodes.contains(code), message.contains("'custom'") {
+                return Rejected(status: status, detail: "\(code) at tools (custom type)", underlying: underlying)
+            }
+            if message.hasPrefix(larkRefusalPrefix) {
+                return Rejected(status: status, detail: "grammar refused at tools", underlying: underlying)
+            }
+        }
+        for path in openRouterValidationPaths(rawBody) {
+            guard path.count == 2, path[0] as? String == "tools", let k = path[1] as? Int, indices.contains(k) else { continue }
+            return Rejected(status: status, detail: "invalid_prompt at tools[\(k)]", underlying: underlying)
+        }
         return nil
+    }
+
+    static let larkRefusalPrefix = "Invalid lark grammar"
+
+    /// The issue paths of OpenRouter's own request-validation refusal:
+    /// `{"error":{"code":"invalid_prompt",…},"metadata":{"raw":"[issues]"}}`.
+    static func openRouterValidationPaths(_ rawBody: Data) -> [[Any]] {
+        guard let object = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any],
+              let error = object["error"] as? [String: Any], error["code"] as? String == "invalid_prompt",
+              let metadata = object["metadata"] as? [String: Any], let raw = metadata["raw"] as? String,
+              let issues = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]] else { return [] }
+        return issues.compactMap { $0["path"] as? [Any] }
     }
 }

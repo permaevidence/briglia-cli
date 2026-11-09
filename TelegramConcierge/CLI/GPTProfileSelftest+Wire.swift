@@ -172,6 +172,49 @@ extension GPTProfileSelftest {
         return jsonText(inner)
     }
 
+    /// Real provider responses captured 2026-11-09 (OpenRouter, Luna and
+    /// gpt-4.1-mini; scripts/fixtures/codex-apply-patch/provider-errors).
+    /// Each fixture states whether the §5.6 classifier must fire for it.
+    static func liveRejectionFixtureTests(_ t: CPTest) async {
+        let dir = URL(fileURLWithPath: t.fixtures).appendingPathComponent("provider-errors")
+        guard let manifestData = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
+              let manifest = (try? JSONSerialization.jsonObject(with: manifestData)) as? [String: Any],
+              let cases = manifest["cases"] as? [[String: Any]], cases.count >= 13 else {
+            t.check("X live fixtures: manifest present", false); return
+        }
+        func load(_ file: String) -> (status: Int, body: Data, request: Data, expect: Bool)? {
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
+                  let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let status = o["status"] as? Int, let body = o["body"] as? String, let expect = o["expect_classified"] as? Bool,
+                  let request = o["request"], let requestData = try? JSONSerialization.data(withJSONObject: request) else { return nil }
+            return (status, Data(body.utf8), requestData, expect)
+        }
+        func fires(_ status: Int, _ body: Data, _ request: Data?) -> Bool {
+            GPTCustomToolRejection.classify(status: status, rawBody: body, requestBody: request, underlying: ResponsesFailure.http(status, nil)) != nil
+        }
+        var positives = 0, negatives = 0
+        for c in cases {
+            guard let file = c["file"] as? String, let f = load(file) else { t.check("X live fixture loads: \(c["file"] ?? "?")", false); continue }
+            if f.expect { positives += 1 } else { negatives += 1 }
+            t.check("X live fixture \(file): classified = \(f.expect)", fires(f.status, f.body, f.request) == f.expect)
+        }
+        t.check("X live fixtures cover both outcomes", positives >= 5 && negatives >= 8, "\(positives)/\(negatives)")
+        // Variants of the real refusals: each guard must hold on its own.
+        let toolsWithout = Data(#"{"tools":[{"type":"function","name":"read_file"},{"type":"function","name":"apply_patch"}]}"#.utf8)
+        if let real = load("or-gpt41mini-openai.json") {
+            t.check("X live custom-type refusal: not classified without a custom entry", !fires(real.status, real.body, toolsWithout))
+            t.check("X live custom-type refusal: not classified on a non-400", !fires(429, real.body, real.request))
+            let other = String(decoding: real.body, as: UTF8.self).replacingOccurrences(of: "'custom'", with: "'function'")
+            t.check("X live `tools` refusal naming another type is not classified", !fires(real.status, Data(other.utf8), real.request))
+            let noCode = String(decoding: real.body, as: UTF8.self).replacingOccurrences(of: #"\"code\": \"unknown_parameter\""#, with: #"\"code\": \"rate_limit_exceeded\""#)
+            t.check("X live `tools` refusal with a non-refusal code is not classified", noCode != String(decoding: real.body, as: UTF8.self) && !fires(real.status, Data(noCode.utf8), real.request))
+        } else { t.check("X live custom-type refusal fixture", false) }
+        if let zod = load("or-badsyntax.json") {
+            let customFirst = Data(#"{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"read_file"}]}"#.utf8)
+            t.check("X live validation refusal at another tool's index is not classified", !fires(zod.status, zod.body, customFirst))
+        } else { t.check("X live validation refusal fixture", false) }
+    }
+
     static func transitionTests(_ t: CPTest) async {
         // Classifier (P41).
         let requestWithCustom = Data(jsonText(["tools": [["type": "function", "name": "read_file"], ["type": "custom", "name": "apply_patch"]]]).utf8)
@@ -196,6 +239,7 @@ extension GPTProfileSelftest {
         t.check("X does not classify an input/history error", !classify(errorBody(param: "input[3]", code: "invalid_value")))
         t.check("X does not classify without a custom entry in the request", !classify(errorBody(param: "tools[1].format", code: "invalid_value"), request: requestWithout))
         t.check("X does not classify a non-400", !classify(errorBody(param: "tools[1].format", code: "invalid_value"), status: 422))
+        await liveRejectionFixtureTests(t)
         // End to end through the loopback route.
         GPTPatchFormStore.fileURLOverrideForTesting = URL(fileURLWithPath: t.dir("xform")).appendingPathComponent("f.json")
         GPTPatchFormStore.shared.resetCacheForTesting()
@@ -250,6 +294,20 @@ extension GPTProfileSelftest {
         server.script([errorBody(param: "input[0]", code: "invalid_value")], statuses: [400])
         _ = try? await request(service, ctx, run: run4, messages: [Message(role: .user, content: "y")], tools: gptTools, root: root)
         t.check("X an unrelated 400 does not transition", run4.config == .gptFreeform && EditingConfig.resolveAtRunStart(ctx) == .gptFreeform)
+        try? GPTPatchFormStore.shared.deleteAll()
+        // End to end with the REAL captured refusal body (2026-11-09).
+        let realFile = URL(fileURLWithPath: t.fixtures).appendingPathComponent("provider-errors/or-gpt41mini-openai.json")
+        if let data = try? Data(contentsOf: realFile), let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let realBody = o["body"] as? String {
+            let run5 = EditingRun.start(ctx)
+            server.script([realBody, reply([doneText])], statuses: [400, 200])
+            let r5 = try? await request(service, ctx, run: run5, messages: [Message(role: .user, content: "z")], tools: gptTools, root: root)
+            let sent5 = server.completeRequests.suffix(2).map(\.body)
+            t.check("X the real captured refusal transitions and resends once in JSON form",
+                    r5 != nil && run5.config == .gptJSON && sent5.count == 2
+                    && tools(sent5[0]).contains { $0["type"] as? String == "custom" }
+                    && !tools(sent5[1]).contains { $0["type"] as? String == "custom" })
+        } else { t.check("X the real captured refusal fixture loads", false) }
         try? GPTPatchFormStore.shared.deleteAll()
     }
 

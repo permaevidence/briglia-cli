@@ -1,0 +1,70 @@
+{
+ "about": "Real provider responses to a request carrying the freeform (custom, lark grammar) apply_patch tool, captured 2026-11-09 for the \u00a75.6 fallback classifier. Identifiers (user_id, generation ids) redacted; no keys. Every non-200 fixture runs through GPTCustomToolRejection.classify in __gpt-profile-selftest group X.",
+ "cases": [
+  {
+   "file": "or-gpt41mini-openai.json",
+   "status": 400,
+   "expect_classified": true
+  },
+  {
+   "file": "or-gpt41mini-auto.json",
+   "status": 400,
+   "expect_classified": true
+  },
+  {
+   "file": "or-badgrammar-openai.json",
+   "status": 400,
+   "expect_classified": true
+  },
+  {
+   "file": "or-badgrammar-azure.json",
+   "status": 400,
+   "expect_classified": true
+  },
+  {
+   "file": "or-badsyntax.json",
+   "status": 400,
+   "expect_classified": true
+  },
+  {
+   "file": "or-invalid-model.json",
+   "status": 400,
+   "expect_classified": false
+  },
+  {
+   "file": "or-bad-effort.json",
+   "status": 400,
+   "expect_classified": false
+  },
+  {
+   "file": "or-bad-input.json",
+   "status": 400,
+   "expect_classified": false
+  },
+  {
+   "file": "or-badtoolchoice-openai.json",
+   "status": 400,
+   "expect_classified": false
+  },
+  {
+   "file": "or-fn-badschema-openai.json",
+   "status": 400,
+   "expect_classified": false
+  },
+  {
+   "file": "or-badgrammar.json",
+   "status": 200,
+   "expect_classified": false
+  },
+  {
+   "file": "or-badgrammar-bedrock.json",
+   "status": 200,
+   "expect_classified": false
+  },
+  {
+   "file": "opencode-oc-freeform.json",
+   "status": 401,
+   "expect_classified": false
+  }
+ ]
+}

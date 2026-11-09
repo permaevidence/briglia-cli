@@ -1,0 +1,63 @@
+{
+ "captured": "2026-11-09",
+ "route": "openrouter",
+ "endpoint": "https://openrouter.ai/api/v1/responses",
+ "status": 400,
+ "content_type": "application/json",
+ "expect_classified": false,
+ "note": "Contrast: OpenRouter validation, reasoning.effort 'bogus' (Zod path ['reasoning','effort']).",
+ "request": {
+  "model": "openai/gpt-6-luna",
+  "input": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "Create the file /tmp/x/hello.txt containing the single line `hello` using the apply_patch tool. Call the tool now; do not explain."
+     }
+    ]
+   }
+  ],
+  "store": false,
+  "stream": true,
+  "truncation": "disabled",
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 400,
+  "tools": [
+   {
+    "type": "function",
+    "name": "read_file",
+    "description": "Read a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    },
+    "strict": false
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+   }
+  ],
+  "reasoning": {
+   "effort": "bogus"
+  }
+ },
+ "body": "{\"error\":{\"code\":\"invalid_prompt\",\"message\":\"Invalid Responses API request\"},\"metadata\":{\"raw\":\"[\\n  {\\n    \\\"code\\\": \\\"invalid_value\\\",\\n    \\\"values\\\": [\\n      \\\"max\\\",\\n      \\\"xhigh\\\",\\n      \\\"high\\\",\\n      \\\"medium\\\",\\n      \\\"low\\\",\\n      \\\"minimal\\\",\\n      \\\"none\\\"\\n    ],\\n    \\\"path\\\": [\\n      \\\"reasoning\\\",\\n      \\\"effort\\\"\\n    ],\\n    \\\"message\\\": \\\"Invalid option: expected one of \\\\\\\"max\\\\\\\"|\\\\\\\"xhigh\\\\\\\"|\\\\\\\"high\\\\\\\"|\\\\\\\"medium\\\\\\\"|\\\\\\\"low\\\\\\\"|\\\\\\\"minimal\\\\\\\"|\\\\\\\"none\\\\\\\"\\\"\\n  }\\n]\"}}"
+}

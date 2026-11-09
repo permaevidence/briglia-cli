@@ -1,0 +1,63 @@
+{
+ "captured": "2026-11-09",
+ "route": "opencode",
+ "endpoint": "https://opencode.ai/zen/go/v1/responses",
+ "status": 401,
+ "content_type": "application/json",
+ "expect_classified": false,
+ "note": "OpenCode Go /responses with the custom tool for gpt-6-luna: the live key has EXPIRED (401 api_key_expired); the freeform question is unanswered.",
+ "request": {
+  "model": "gpt-6-luna",
+  "input": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "Create the file /tmp/x/hello.txt containing the single line `hello` using the apply_patch tool. Call the tool now; do not explain."
+     }
+    ]
+   }
+  ],
+  "store": false,
+  "stream": true,
+  "truncation": "disabled",
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 400,
+  "tools": [
+   {
+    "type": "function",
+    "name": "read_file",
+    "description": "Read a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    },
+    "strict": false
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+   }
+  ],
+  "reasoning": {
+   "effort": "low"
+  }
+ },
+ "body": "{\"error\":{\"type\":\"authentication_error\",\"code\":\"api_key_expired\",\"message\":\"This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store. Signing in again will not renew this key.\"}}"
+}
