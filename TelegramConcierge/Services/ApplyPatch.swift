@@ -262,11 +262,9 @@ enum ApplyPatch {
         // or moved by a file tool, as source or destination.
         switch op {
         case .add(let path, _), .delete(let path):
-            if SIWCProtectedFiles.isProtected(path) { throw PatchError(message: SIWCProtectedFiles.refusal) }
+            if let refusal = EditProtections.siwcRefusal([path]) { throw PatchError(message: refusal) }
         case .update(let path, _, let moveTo):
-            if SIWCProtectedFiles.isProtected(path) || moveTo.map({ SIWCProtectedFiles.isProtected($0) }) == true {
-                throw PatchError(message: SIWCProtectedFiles.refusal)
-            }
+            if let refusal = EditProtections.siwcRefusal([path] + (moveTo.map { [$0] } ?? [])) { throw PatchError(message: refusal) }
         }
         switch op {
         case .add(let path, let content):

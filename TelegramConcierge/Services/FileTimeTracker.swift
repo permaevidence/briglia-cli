@@ -17,7 +17,31 @@ actor FileTimeTracker {
 
     private var snapshots: [String: Snapshot] = [:]
 
+    /// GPT-only evidence (GPT_APPLY_PATCH_PLAN §7), keyed by canonical
+    /// resolved path. A separate store: standard tools never read it, and
+    /// nothing here ever touches `snapshots` (standard evidence).
+    private var gptSnapshots: [String: GPTEvidence.Record] = [:]
+
     private init() {}
+
+    // MARK: - GPT-only evidence (never consulted by standard tools)
+
+    /// Publishes a receipt. Callers publish only after the result that earned
+    /// it was delivered to the model (§7 observation receipts).
+    func publishGPT(_ receipt: GPTEvidence.Receipt) {
+        gptSnapshots[receipt.key] = GPTEvidence.Record(identity: receipt.identity, recordedAt: Date(), source: receipt.source)
+    }
+
+    func gptRecord(forKey key: String) -> GPTEvidence.Record? { gptSnapshots[key] }
+
+    /// A GPT delete forgets only the GPT record of that path.
+    func forgetGPT(key: String) { gptSnapshots.removeValue(forKey: key) }
+
+    /// Selftests only.
+    func resetGPTForTesting() { gptSnapshots.removeAll() }
+
+    /// Selftests only: the standard record, to prove GPT paths never touch it.
+    func standardSnapshotForTesting(path: String) -> Snapshot? { snapshots[path] }
 
     /// Record that the agent just read `path`, stamping the current on-disk (mtime, size).
     func recordRead(path: String) {

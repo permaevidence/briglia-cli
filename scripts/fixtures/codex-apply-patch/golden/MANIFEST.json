@@ -1,0 +1,22 @@
+{
+  "build_recipe": "git fetch --depth 1 https://github.com/openai/codex.git 4e4767ffa763ec0d0a19e04cf8ff0163a987297b; cd codex-rs; cargo build -p codex-apply-patch --bin apply_patch --release",
+  "cases_sha256": "f748276b413f86339e59cdab49505ed69b5d0f03bb2a69b4ccf2cb9e0c8bc7de",
+  "count": 2000,
+  "generator": "scripts/codex_patch_golden.py",
+  "generator_version": 1,
+  "oracle_entry_point": "codex-rs/apply-patch/src/main.rs -> standalone_executable::main -> lib.rs apply_patch",
+  "pinned_commit": "4e4767ffa763ec0d0a19e04cf8ff0163a987297b",
+  "seed": 20261109,
+  "stats": {
+    "BOM": 69,
+    "TX": 217,
+    "err": 456,
+    "ok": 1258
+  },
+  "toolchain": {
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27) (Homebrew)",
+    "cargo_lock_sha256": "69b98ef751338d03f2f4fabdd1ea33fd3815854ac6a6a455bc5c91aec169bdc1",
+    "oracle_sha256": "8bb7724bb7fb06c8c8193d03216752aa0509692f2ad876fc46d147d3dc3b2cc6",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Homebrew)"
+  }
+}

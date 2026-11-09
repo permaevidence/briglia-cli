@@ -1,0 +1,4 @@
+# Rust tests of the pinned Codex apply-patch sources that have no Swift
+# counterpart, one per line: <module>::<test> — <reason>.
+# scripts/codex_patch_fidelity_check.py fails on any other untagged test.
+parser::test_hunk_resolve_path_accepts_relative_and_absolute_paths — Briglia has no working directory (D2): relative paths are refused before any work (E.P1, F.51b) and absolute paths are used as written (F.3, F.51a)

@@ -786,6 +786,19 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__diff-pipe-selftest"], capture_output=True, text=True, timeout=300)
     check("diff pipe selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # GPT apply_patch engine (stage S1, not exposed to any model yet): source
+    # fidelity against the pinned Codex sources, engine and transaction tests
+    # with failure injection, the 25 Codex scenarios and the 2,000-case golden
+    # differential corpus. Re-executes itself in a private scratch home and
+    # preference domain. The fidelity gate maps every pinned Rust test to a
+    # Swift check (or a recorded exemption) and verifies the vendored hashes.
+    fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "codex-apply-patch")
+    result = run_selftest([os.path.abspath(ADA), "__codex-patch-selftest", "--fixtures", fixtures], capture_output=True, text=True, timeout=600)
+    check("codex patch selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
+    result = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "codex_patch_fidelity_check.py")],
+                            capture_output=True, text=True, timeout=120)
+    check("codex patch source-fidelity gate", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Same pipe deadlock in the unzip / installer / shortcuts process helpers: a
     # 3,000-entry zip listed and extracted by the real unzip, ~100 KB and 1 MB
     # of stdout complete through each helper, stderr floods cannot block,

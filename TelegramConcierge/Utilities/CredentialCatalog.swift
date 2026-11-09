@@ -319,14 +319,25 @@ enum HarnessSecretStore {
 
     /// Reason to refuse an apply_patch hunk set on the store, or nil.
     static func patchRefusal(hunks: [ApplyPatch.Hunk]) -> String? {
-        var touched: [String] = []
+        var changed: [(added: Bool, text: String)] = []
         for hunk in hunks {
             for (kind, line) in hunk.diff where kind != .context {
-                if kind == .added, line.contains(placeholderPrefix) {
-                    return "patch refused: an added line contains a \(placeholderPrefix)…] placeholder. That is the masked display of the Telegram bot token, not file content — never write it back."
-                }
-                touched.append(line)
+                changed.append((added: kind == .added, text: line))
             }
+        }
+        return patchRefusal(changedLines: changed)
+    }
+
+    /// Engine-neutral form (shared by the legacy `apply_patch` and the GPT
+    /// `CodexPatch` engine through `EditProtections`): every non-context
+    /// line of the patch, in patch order, flagged when it is an added line.
+    static func patchRefusal(changedLines: [(added: Bool, text: String)]) -> String? {
+        var touched: [String] = []
+        for line in changedLines {
+            if line.added, line.text.contains(placeholderPrefix) {
+                return "patch refused: an added line contains a \(placeholderPrefix)…] placeholder. That is the masked display of the Telegram bot token, not file content — never write it back."
+            }
+            touched.append(line.text)
         }
         return refusalForTokenField(texts: touched)
     }
