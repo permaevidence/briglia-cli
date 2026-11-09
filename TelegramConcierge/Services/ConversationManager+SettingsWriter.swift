@@ -167,7 +167,10 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
     /// A settings command's prepared change through the transaction: under
     /// the command's token when it holds one, else a normal commit.
     func commitFromSettingsCommand(_ change: PreparedChange) async -> SettingsCommitResult {
-        if let token = Self.settingsCommandToken {
+        // Only the task that acquired the token writes under it: a task
+        // spawned inside the command inherits the task-local but not the
+        // token, and queues like any other writer (0.2.70).
+        if let token = Self.settingsCommandToken, settingsWriter.gate.tokenHeldByCurrentTask == token {
             return await settingsWriter.commitHolding(token, change, policy: .classify)
         }
         return await settingsWriter.commit(change)

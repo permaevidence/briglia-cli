@@ -283,10 +283,10 @@ extension SettingsWriter {
             }
             return .refused(why)
         }
-        guard let token = await gate.acquire() else {
+        guard let (token, reused) = await acquireOrReuse() else {
             return await refuse(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment.")
         }
-        defer { gate.release(token); kickAfterSIWC() }
+        defer { if !reused { gate.release(token); kickAfterSIWC() } }
         if let why = host?.admissionRefusal() { return await refuse(why) }
         guard (try? ReplacementEpoch.read()) == request.epoch else { return await refuse(Self.epochMessage) }
         let store = request.signIn.store
@@ -340,8 +340,8 @@ extension SettingsWriter {
 
     /// Cancel this profile's pending SIWC sign-in in `store` (S).
     func commitSIWCCancel(store: SIWCStore, profile: String = AssistantProfile.selectedName) async -> SettingsCommitResult {
-        guard let token = await gate.acquire() else { return .refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment.") }
-        defer { gate.release(token); kickAfterSIWC() }
+        guard let (token, reused) = await acquireOrReuse() else { return .refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment.") }
+        defer { if !reused { gate.release(token); kickAfterSIWC() } }
         if let why = host?.admissionRefusal() { return .refused(why) }
         let file: SIWCTokenFile?
         do { file = try store.readTokens() } catch { return .refused((error as? SIWCError)?.message ?? error.localizedDescription) }
@@ -388,10 +388,12 @@ extension SettingsWriter {
                           revoke: @escaping (SIWCStore.Tombstone) async -> Bool,
                           drainTimeout: TimeInterval = 10) async -> SIWCLogoutOutcome {
         lastLogoutStoppedJobs = 0
-        guard let token = await gate.acquire() else {
+        guard let (token, reused) = await acquireOrReuse() else {
             return .refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment. Nothing changed.")
         }
-        var released = false
+        // A reused token (Telegram /subscription logout official runs under
+        // its command's token) is released by its owner, not here.
+        var released = reused
         func release() { if !released { released = true; gate.release(token); kickAfterSIWC() } }
         defer { release() }
         // 1. Validate, write-free.

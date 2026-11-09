@@ -8,6 +8,14 @@ import Foundation
 /// (Mind import, /deleteuserdata, shutdown, the upgrade barrier) close
 /// admission, settle the waiters, cancel the holder's write-free wait and
 /// then take the token themselves.
+///
+/// Not reentrant (0.2.70): a task that holds the token and asks for it again
+/// would wait on itself forever (Telegram `/subscription login official`
+/// deadlocked this way in 0.2.69). The writer therefore reuses the token for
+/// writes made by the very task that acquired it (`tokenHeldByCurrentTask`),
+/// and `acquire` refuses such a reentry at once instead of hanging. Other
+/// tasks — including tasks spawned while the token is held, which inherit
+/// task-local values — never match and queue as usual.
 @MainActor
 final class SettingsCommitGate {
     struct Token: Equatable, Sendable { fileprivate let id: UInt64 }
@@ -20,18 +28,39 @@ final class SettingsCommitGate {
 
     private var counter: UInt64 = 0
     private var holder: Token?
+    /// The task that acquired `holder` (its identity, never a task-local).
+    private var holderTask: Int?
     private var holderPhase: Phase = .preCommit
     private var holderCancel: (() -> Void)?
-    private var waiters: [(id: UInt64, lifecycle: Bool, resume: CheckedContinuation<Token?, Never>)] = []
+    private var waiters: [(id: UInt64, lifecycle: Bool, task: Int?, resume: CheckedContinuation<Token?, Never>)] = []
     private(set) var admissionClosedReason: String?
 
     var isHeld: Bool { holder != nil }
     var queued: Int { waiters.count }
     var holderInDurablePhase: Bool { holder != nil && holderPhase == .durable }
 
+    /// Identity of the running task (unstructured and child tasks differ
+    /// from their creator; nil outside a task).
+    nonisolated static func currentTaskKey() -> Int? { withUnsafeCurrentTask { $0?.hashValue } }
+
+    /// The token the CALLING task acquired itself and still holds, or nil.
+    var tokenHeldByCurrentTask: Token? {
+        guard let holder, let owner = holderTask, let me = Self.currentTaskKey(), owner == me else { return nil }
+        return holder
+    }
+
+    /// Reentrant acquires refused (diagnostics and selftests).
+    private(set) var reentryRefusals = 0
+
     /// Ordinary writers: nil = admission is closed (refused at once).
     func acquire() async -> Token? {
         if admissionClosedReason != nil { return nil }
+        if tokenHeldByCurrentTask != nil {
+            // Waiting here would wait on this task's own token forever.
+            reentryRefusals += 1
+            print("[SettingsCommitGate] refused a reentrant acquire: this task already holds the settings commit token (it would wait on itself forever)")
+            return nil
+        }
         return await enqueue(lifecycle: false)
     }
 
@@ -43,24 +72,25 @@ final class SettingsCommitGate {
     private func enqueue(lifecycle: Bool) async -> Token? {
         counter &+= 1
         let id = counter
+        let task = Self.currentTaskKey()
         if holder == nil && waiters.isEmpty {
             let token = Token(id: id)
-            holder = token; holderPhase = .preCommit; holderCancel = nil
+            holder = token; holderTask = task; holderPhase = .preCommit; holderCancel = nil
             return token
         }
         return await withCheckedContinuation { continuation in
-            waiters.append((id, lifecycle, continuation))
+            waiters.append((id, lifecycle, task, continuation))
         }
     }
 
     func release(_ token: Token) {
         guard holder == token else { return }
-        holder = nil; holderCancel = nil; holderPhase = .preCommit
+        holder = nil; holderTask = nil; holderCancel = nil; holderPhase = .preCommit
         while !waiters.isEmpty {
             let next = waiters.removeFirst()
             if admissionClosedReason != nil && !next.lifecycle { next.resume.resume(returning: nil); continue }
             let token = Token(id: next.id)
-            holder = token; holderPhase = .preCommit; holderCancel = nil
+            holder = token; holderTask = next.task; holderPhase = .preCommit; holderCancel = nil
             next.resume.resume(returning: token)
             return
         }
@@ -92,7 +122,7 @@ final class SettingsCommitGate {
     /// a refusal, cancel the holder's write-free wait.
     func closeAdmission(reason: String) {
         admissionClosedReason = reason
-        var kept: [(id: UInt64, lifecycle: Bool, resume: CheckedContinuation<Token?, Never>)] = []
+        var kept: [(id: UInt64, lifecycle: Bool, task: Int?, resume: CheckedContinuation<Token?, Never>)] = []
         for w in waiters {
             if w.lifecycle { kept.append(w) } else { w.resume.resume(returning: nil) }
         }

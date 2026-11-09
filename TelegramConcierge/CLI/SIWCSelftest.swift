@@ -24,6 +24,8 @@ struct SIWCSelftest: AsyncParsableCommand {
     @Flag(name: .customLong("telegram-child")) var telegramChild = false
     /// Live-bug fix round: the startup rows, inside the isolated child.
     @Flag(name: .customLong("startup-child")) var startupChild = false
+    /// 0.2.70: the Telegram /subscription command-token rows, inside the isolated child.
+    @Flag(name: .customLong("command-token-child")) var commandTokenChild = false
 
     final class Checks {
         var total = 0, failed = 0
@@ -59,6 +61,12 @@ struct SIWCSelftest: AsyncParsableCommand {
                 throw ValidationError("refusing: not the live-startup child's roots")
             }
             try await Self.startupChild(); return
+        }
+        if commandTokenChild {
+            guard (ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] ?? "").contains("/ct-") else {
+                throw ValidationError("refusing: not the command-token child's roots")
+            }
+            try await Self.commandTokenChild(); return
         }
         if olderFixture || resolveRoute {
             guard (ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] ?? "").contains("briglia-siwc-older-") else {
@@ -103,6 +111,8 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("live-listener", Self.liveListenerTests), ("live-startup", Self.liveStartupTests), ("live-replay", Self.liveReplayTests),
             // 0.2.68: max reasoning effort on both ChatGPT routes.
             ("effort-max", Self.maxEffortTests),
+            // 0.2.70: settings commands reuse their own commit token (Telegram /subscription deadlock).
+            ("cmd-token", Self.commandTokenTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")

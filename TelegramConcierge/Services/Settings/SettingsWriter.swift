@@ -100,6 +100,15 @@ final class SettingsWriter {
         if SettingsCapture.current != nil {
             return await SettingsCapture.$current.withValue(nil) { await commit(change, policy: policy, stillValid: stillValid) }
         }
+        // A settings command committing its own change (Telegram
+        // /subscription login|use official) already holds the token in this
+        // very task: run under it (the gate is not reentrant; its owner
+        // releases it and kicks the idle apply).
+        if let held = reusableHeldToken() {
+            let r = await commitHolding(held, change, policy: policy, stillValid: stillValid)
+            remember(change.id, r)
+            return r
+        }
         guard let token = await gate.acquire() else {
             let r = SettingsCommitResult.refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment.")
             remember(change.id, r); return r
@@ -108,6 +117,25 @@ final class SettingsWriter {
         let r = await commitHolding(token, change, policy: policy, stillValid: stillValid)
         remember(change.id, r)
         return r
+    }
+
+    /// The token the calling task acquired itself and still holds, reusable
+    /// for its own writes while settings admission is open (0.2.70: the
+    /// Telegram /subscription self-deadlock). A lifecycle operation closed
+    /// admission and writes through `commitHolding` explicitly; nested
+    /// commits there stay refused as before.
+    func reusableHeldToken() -> SettingsCommitGate.Token? {
+        guard gate.admissionClosedReason == nil else { return nil }
+        return gate.tokenHeldByCurrentTask
+    }
+
+    /// The token for a writer entry point (SIWC save, cancel, sign-out):
+    /// the calling task's own held token (`reused`: never released here), or
+    /// a fresh acquisition. nil = admission closed (refused).
+    func acquireOrReuse() async -> (token: SettingsCommitGate.Token, reused: Bool)? {
+        if let held = reusableHeldToken() { return (held, true) }
+        guard let token = await gate.acquire() else { return nil }
+        return (token, false)
     }
 
     /// The same transaction for a caller that already holds the token (a
