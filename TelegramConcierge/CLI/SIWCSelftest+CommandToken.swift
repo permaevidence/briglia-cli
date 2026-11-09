@@ -205,8 +205,13 @@ extension SIWCSelftest {
         let pipe = Pipe()
         process.standardOutput = pipe
         try process.run()
+        // A wedged child (the 0.2.69 shape under a deliberate break) is
+        // killed after 4 minutes; its printed rows are still judged.
+        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 240, execute: watchdog)
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        watchdog.cancel()
         TestPrefsDomains.purge(commandTokenLinkName)
         var rows = 0
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init) {
@@ -221,6 +226,7 @@ extension SIWCSelftest {
     /// (the old deadlock) can never keep the child alive.
     @MainActor
     static func commandTokenChild() async throws {
+        setvbuf(stdout, nil, _IOLBF, 0)   // rows reach the parent even if this child is killed
         let c = Checks()
         let offline = SIWCError(.local, "selftest: network disabled")
         SIWCAuthClient.sendOverride = { _, _ in throw offline }
@@ -275,7 +281,7 @@ extension SIWCSelftest {
         /// Send a command; wait for a NEW message matching `reply` and for the gate to be free.
         func command(_ id: Int, _ text: String, seconds: Double = 6, _ reply: @escaping (String) -> Bool) async -> (replied: Bool, released: Bool, text: String) {
             let before = sent().count
-            await manager._testProcessUpdate(update(id, text))
+            _ = await finishes(within: seconds) { await manager._testProcessUpdate(update(id, text)) }
             let replied = await waitFor(seconds) { sent().dropFirst(before).contains(where: reply) }
             let released = await waitFor(2) { !gate.isHeld }
             return (replied, released, sent().dropFirst(before).joined(separator: " | "))
