@@ -36,7 +36,8 @@ enum GPTFreeform {
 /// §5.6 classifier: a provider's refusal of the freeform `apply_patch`
 /// entry's TYPE or FORMAT itself (Codex S2 R5: conservative until a live
 /// rejection fixture exists). Produced only when ALL hold: HTTP 400; the
-/// request carried a `custom` tool entry at index k; and either
+/// request carried a `custom` tool entry at index k (or a namespaced one,
+/// below); and either
 /// - `param` is `tools[k].type` or `tools[k].format` (or a sub-path of the
 ///   format), with a code from `refusalCodes`; or
 /// - `param` is the whole entry `tools[k]` with a type-specific code from
@@ -59,6 +60,12 @@ enum GPTFreeform {
 ///   a top-level `metadata.raw` JSON array of validation issues, one of
 ///   them at path exactly `["tools", k]` for a custom entry k. Issues at any
 ///   other path (input, reasoning, tool_choice, other tools) never classify.
+///
+/// Stage 3 (ChatGPT routes, 2026-11-09): "the entry" is a top-level
+/// `tools[k]` or, on Sign in with ChatGPT where every tool sits inside the
+/// `briglia` namespace, `tools[i].tools[j]` (`customEntries`); SIWC's own
+/// `unsupported_capability` naming that entry (`classifySIWCCapability`);
+/// and the HTTP-200 streamed refusals (`classifyTerminal`).
 enum GPTCustomToolRejection {
     struct Rejected: Error, LocalizedError {
         let status: Int
@@ -74,10 +81,32 @@ enum GPTCustomToolRejection {
     /// Codes that by themselves name the tool type as the problem.
     static let typeCodes: Set<String> = ["unsupported_tool_type", "invalid_tool_type"]
 
-    static func customIndices(_ requestBody: Data?) -> Set<Int> {
-        guard let requestBody, let object = (try? JSONSerialization.jsonObject(with: requestBody)) as? [String: Any],
+    /// Where the request carried a `custom` tool entry: the `param` base
+    /// string OpenAI-style errors use and the JSON path OpenRouter's
+    /// validation issues use. Top-level entries (`tools[k]`, ["tools", k])
+    /// and, for Sign in with ChatGPT, entries inside a `namespace` tool
+    /// (`tools[i].tools[j]`, ["tools", i, "tools", j]; stage 3).
+    struct CustomEntry: Equatable {
+        let param: String
+        let path: [JSONPathElement]
+    }
+    enum JSONPathElement: Equatable { case key(String), index(Int) }
+
+    static func customEntries(_ requestBody: Data?) -> [CustomEntry] {
+        guard let requestBody, requestBody.count <= ResponsesLimits.roundBytes,
+              let object = (try? JSONSerialization.jsonObject(with: requestBody)) as? [String: Any],
               let tools = object["tools"] as? [[String: Any]] else { return [] }
-        return Set(tools.indices.filter { tools[$0]["type"] as? String == "custom" })
+        var out: [CustomEntry] = []
+        for (i, tool) in tools.enumerated() {
+            if tool["type"] as? String == "custom" {
+                out.append(CustomEntry(param: "tools[\(i)]", path: [.key("tools"), .index(i)]))
+            } else if tool["type"] as? String == "namespace", let inner = tool["tools"] as? [[String: Any]] {
+                for (j, entry) in inner.enumerated() where entry["type"] as? String == "custom" {
+                    out.append(CustomEntry(param: "tools[\(i)].tools[\(j)]", path: [.key("tools"), .index(i), .key("tools"), .index(j)]))
+                }
+            }
+        }
+        return out
     }
 
     /// The error object: the body's own `error`, or the upstream one carried
@@ -94,17 +123,19 @@ enum GPTCustomToolRejection {
         return out
     }
 
+    /// `param` names the entry's type or format (or a sub-path of the format).
+    static func namesTypeOrFormat(_ param: String, _ base: String) -> Bool {
+        param == base + ".type" || param == base + ".format" || param.hasPrefix(base + ".format.") || param.hasPrefix(base + ".format[")
+    }
+
     static func classify(status: Int, rawBody: Data, requestBody: Data?, underlying: Error) -> Error? {
         guard status == 400 else { return nil }
-        let indices = customIndices(requestBody)
-        guard !indices.isEmpty, rawBody.count <= 64 * 1024 else { return nil }
+        let entries = customEntries(requestBody)
+        guard !entries.isEmpty, rawBody.count <= 64 * 1024 else { return nil }
         for error in errorObjects(rawBody) {
             guard let param = error["param"] as? String, let code = error["code"] as? String, refusalCodes.contains(code) else { continue }
-            for k in indices {
-                let base = "tools[\(k)]"
-                let typeOrFormat = param == base + ".type" || param == base + ".format"
-                    || param.hasPrefix(base + ".format.") || param.hasPrefix(base + ".format[")
-                if typeOrFormat || (param == base && typeCodes.contains(code)) {
+            for entry in entries {
+                if namesTypeOrFormat(param, entry.param) || (param == entry.param && typeCodes.contains(code)) {
                     return Rejected(status: status, detail: "\(code) at \(param)", underlying: underlying)
                 }
             }
@@ -119,21 +150,100 @@ enum GPTCustomToolRejection {
             }
         }
         for path in openRouterValidationPaths(rawBody) {
-            guard path.count == 2, path[0] as? String == "tools", let k = path[1] as? Int, indices.contains(k) else { continue }
-            return Rejected(status: status, detail: "invalid_prompt at tools[\(k)]", underlying: underlying)
+            guard let entry = entries.first(where: { $0.path == path }) else { continue }
+            return Rejected(status: status, detail: "invalid_prompt at \(entry.param)", underlying: underlying)
         }
         return nil
+    }
+
+    /// Sign in with ChatGPT names an unsupported part of the request with
+    /// `unsupported_capability` and its `param` (SIWCErrors). Checked BEFORE
+    /// the SIWC classification, and only when that `param` is exactly a
+    /// custom entry the request carried or its type/format: the route then
+    /// refuses the freeform tool itself, and the one JSON fallback on the same
+    /// route (no paid path) is the right answer. Any other SIWC error, and an
+    /// `unsupported_capability` naming anything else, keep today's handling.
+    static func classifySIWCCapability(status: Int, rawBody: Data, requestBody: Data?, underlying: Error) -> Error? {
+        guard status == 400, rawBody.count <= 64 * 1024 else { return nil }
+        let entries = customEntries(requestBody)
+        guard !entries.isEmpty,
+              let object = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any],
+              let error = object["error"] as? [String: Any], error["code"] as? String == "unsupported_capability",
+              let param = error["param"] as? String else { return nil }
+        guard entries.contains(where: { param == $0.param || namesTypeOrFormat(param, $0.param) }) else { return nil }
+        return Rejected(status: status, detail: "unsupported_capability at \(param)", underlying: underlying)
+    }
+
+    /// Terminal-answer reasons that are ordinary model outcomes, never a
+    /// tool-format refusal.
+    static let ordinaryIncompleteReasons: Set<String> = ["max_output_tokens", "content_filter"]
+
+    /// §5.6 streamed refusals (stage 3): HTTP 200 whose stream ends in a
+    /// `response.failed` or `response.incomplete` terminal instead of an
+    /// HTTP 400. `bytes` is the terminal snapshot the stream assembled (or
+    /// the JSON body). Produced only when ALL hold: the request carried a
+    /// `custom` entry (top level or in a namespace); the stream carried no
+    /// output item and no delta of any kind (`streamedOutput == false`); the
+    /// terminal's `output` is empty; and either
+    /// - `failed` with an error whose message starts "Invalid lark grammar"
+    ///   (any code; OpenRouter automatic routing, captured 2026-11-09:
+    ///   code `invalid_prompt`). A generic failure (`server_error`
+    ///   "Provider returned an empty response", Bedrock, same capture) never
+    ///   classifies; or
+    /// - `incomplete` on a ChatGPT route (legacy or SIWC; probes P1/P2 R5,
+    ///   2026-11-09: a malformed grammar ended this way on both, with no
+    ///   output) whose reason is absent or not an ordinary outcome
+    ///   (`max_output_tokens`, `content_filter`) and that reports no output
+    ///   tokens. Never on any other route.
+    /// Cancellations, usage limits (typed earlier by the stream), transport
+    /// errors and completed-but-empty answers never reach this rule.
+    static func classifyTerminal(_ bytes: Data, requestBody: Data?, chatGPTRoute: Bool, streamedOutput: Bool,
+                                 underlying: Error) -> Error? {
+        guard !streamedOutput, bytes.count <= 64 * 1024, !customEntries(requestBody).isEmpty,
+              let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+              let status = object["status"] as? String else { return nil }
+        if let output = object["output"] {
+            guard let items = output as? [Any], items.isEmpty else { return nil }
+        }
+        switch status {
+        case "failed":
+            guard let error = object["error"] as? [String: Any], let message = error["message"] as? String,
+                  message.hasPrefix(larkRefusalPrefix) else { return nil }
+            return Rejected(status: 200, detail: "grammar refused in the stream", underlying: underlying)
+        case "incomplete":
+            guard chatGPTRoute else { return nil }
+            if let details = object["incomplete_details"], !(details is NSNull) {
+                guard let details = details as? [String: Any] else { return nil }
+                if let reason = details["reason"] as? String, ordinaryIncompleteReasons.contains(reason) { return nil }
+            }
+            if let usage = object["usage"] as? [String: Any], let outputTokens = usage["output_tokens"] as? Int, outputTokens > 0 {
+                return nil
+            }
+            return Rejected(status: 200, detail: "empty incomplete answer to the freeform tool", underlying: underlying)
+        default:
+            return nil
+        }
     }
 
     static let larkRefusalPrefix = "Invalid lark grammar"
 
     /// The issue paths of OpenRouter's own request-validation refusal:
     /// `{"error":{"code":"invalid_prompt",…},"metadata":{"raw":"[issues]"}}`.
-    static func openRouterValidationPaths(_ rawBody: Data) -> [[Any]] {
+    static func openRouterValidationPaths(_ rawBody: Data) -> [[JSONPathElement]] {
         guard let object = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any],
               let error = object["error"] as? [String: Any], error["code"] as? String == "invalid_prompt",
               let metadata = object["metadata"] as? [String: Any], let raw = metadata["raw"] as? String,
               let issues = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]] else { return [] }
-        return issues.compactMap { $0["path"] as? [Any] }
+        return issues.compactMap { issue -> [JSONPathElement]? in
+            guard let path = issue["path"] as? [Any] else { return nil }
+            var out: [JSONPathElement] = []
+            for element in path {
+                // A JSON string is a key, an integer an index (as before).
+                if let key = element as? String { out.append(.key(key)); continue }
+                guard let index = element as? Int else { return nil }
+                out.append(.index(index))
+            }
+            return out
+        }
     }
 }

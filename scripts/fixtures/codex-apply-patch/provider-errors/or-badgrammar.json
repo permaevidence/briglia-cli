@@ -5,7 +5,7 @@
  "status": 200,
  "content_type": "text/event-stream",
  "expect_classified": false,
- "note": "Contrast/gap: same invalid grammar under automatic routing arrived as HTTP 200 + SSE response.failed (code invalid_prompt). The HTTP classifier never sees it (not a 400).",
+ "note": "Same invalid grammar under automatic routing arrived as HTTP 200 + SSE response.failed (code invalid_prompt, message 'Invalid lark grammar…'). Not an HTTP 400, so the HTTP classifier does not see it; stage 3's streamed rule (classifyTerminal) classifies it.",
  "request": {
   "model": "openai/gpt-6-luna",
   "input": [

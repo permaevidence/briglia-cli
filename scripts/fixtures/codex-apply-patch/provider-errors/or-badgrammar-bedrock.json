@@ -5,7 +5,7 @@
  "status": 200,
  "content_type": "text/event-stream",
  "expect_classified": false,
- "note": "Contrast/gap: Bedrock answered the invalid grammar with HTTP 200 + SSE response.failed 'Provider returned an empty response' (server_error).",
+ "note": "Bedrock answered the invalid grammar with HTTP 200 + SSE response.failed 'Provider returned an empty response' (server_error). Generic: neither the HTTP nor the streamed rule may classify it.",
  "request": {
   "model": "openai/gpt-6-luna",
   "input": [

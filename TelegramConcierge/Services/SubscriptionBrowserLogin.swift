@@ -28,7 +28,7 @@ actor SubscriptionBrowserCallback {
             return .init(status: 200, headers: [("Content-Type", "text/plain"), ("Cache-Control", "no-store")], body: Data("Login declined. Return to Briglia.".utf8))
         }
         guard errors.isEmpty, codes.count == 1,
-              let code = codes[0].value, !code.isEmpty, code.utf8.count <= 1024 else { return .status(400) }
+              let code = codes[0].value, !code.isEmpty, code.utf8.count <= CallbackPaste.maxCodeBytes else { return .status(400) }
         consumed = true; self.code = code
         return .init(status: 200, headers: [("Content-Type", "text/plain; charset=utf-8"), ("Cache-Control", "no-store")],
                      body: Data("Authorization received. Return to Briglia to check completion.".utf8))
@@ -66,6 +66,9 @@ extension SubscriptionLogin {
             .sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         return url.url!.absoluteString
     }
+    /// The legacy browser listener's wire policy (selftest-visible).
+    static let callbackPolicy = QuickSetupHTTPServer.Policy.legacyOAuthCallback
+
     func browser(show: (String) async throws -> Void) async throws -> String {
         // One browser sign-in per computer: every assistant's callback needs
         // the fixed port 1455 (MULTI_ASSISTANT_PLAN §5.4). Taken before the
@@ -75,7 +78,10 @@ extension SubscriptionLogin {
         let pending = try await store.beginLogin()
         let state = Self.randomURLToken(), verifier = Self.randomURLToken()
         let callback = SubscriptionBrowserCallback(state: state)
-        let server = QuickSetupHTTPServer(port: 1455, reuseAddress: true) { await callback.receive($0) }
+        // The OAuth callback policy (8 KiB line, RFC 3986 query bytes,
+        // readable refusal page): `.standard` refused every real callback
+        // (`scope=openid+profile+…`) with an empty 400 (fixed in 0.2.71).
+        let server = QuickSetupHTTPServer(port: 1455, reuseAddress: true, policy: Self.callbackPolicy) { await callback.receive($0) }
         defer { server.stop() }
         do {
             do { try server.start() } catch {

@@ -1,5 +1,5 @@
 {
- "about": "Real provider responses to a request carrying the freeform (custom, lark grammar) apply_patch tool, captured 2026-11-09 for the \u00a75.6 fallback classifier. Identifiers (user_id, generation ids) redacted; no keys. Every non-200 fixture runs through GPTCustomToolRejection.classify in __gpt-profile-selftest group X.",
+ "about": "Real provider responses to a request carrying the freeform (custom, lark grammar) apply_patch tool, captured 2026-11-09 for the \u00a75.6 fallback classifier. Identifiers (user_id, generation ids) redacted; no keys. Every non-200 fixture runs through GPTCustomToolRejection.classify in __gpt-profile-selftest group X. Stage 3: the two HTTP-200 SSE captures also state expect_stream_classified (GPTCustomToolRejection.classifyTerminal, __gpt-profile-selftest group Y).",
  "cases": [
   {
    "file": "or-gpt41mini-openai.json",
@@ -54,12 +54,14 @@
   {
    "file": "or-badgrammar.json",
    "status": 200,
-   "expect_classified": false
+   "expect_classified": false,
+   "expect_stream_classified": true
   },
   {
    "file": "or-badgrammar-bedrock.json",
    "status": 200,
-   "expect_classified": false
+   "expect_classified": false,
+   "expect_stream_classified": false
   },
   {
    "file": "opencode-oc-freeform.json",

@@ -70,11 +70,18 @@ enum SIWCBody {
         return try wrapTools(out)
     }
 
-    /// Replayed `function_call` items carry the namespace (native and
-    /// semantic replay); a different namespace is refused.
+    /// Item types that name a tool and so carry the namespace on replay:
+    /// `function_call`, and the freeform `custom_tool_call`
+    /// (GPT_APPLY_PATCH_PLAN §5.2, probe P2 2026-11-09). Their outputs carry
+    /// no namespace (accepted by the route as sent).
+    static let namespacedItemTypes: Set<String> = ["function_call", "custom_tool_call"]
+
+    /// Replayed `function_call` / `custom_tool_call` items carry the
+    /// namespace (native and semantic replay); a different namespace is refused.
     static func namespaced(_ items: [JSONValue]) throws -> [JSONValue] {
         try items.map { item in
-            guard var object = item.responsesObject, object["type"]?.responsesString == "function_call" else { return item }
+            guard var object = item.responsesObject, let type = object["type"]?.responsesString,
+                  namespacedItemTypes.contains(type) else { return item }
             if let ns = object["namespace"] {
                 guard ns.responsesString == SIWCEndpoint.namespace else { throw Failure(reason: "replayed call in another namespace") }
                 return item
@@ -84,7 +91,9 @@ enum SIWCBody {
         }
     }
 
-    /// All function tools in ONE `briglia` namespace (already wrapped: kept).
+    /// All tools in ONE `briglia` namespace (already wrapped: kept): function
+    /// tools, and the freeform `apply_patch` custom tool (GPT_APPLY_PATCH_PLAN
+    /// §5.2; accepted inside the namespace by probe P2, 2026-11-09).
     static func wrapTools(_ body: [String: JSONValue]) throws -> [String: JSONValue] {
         guard let tools = body["tools"]?.responsesArray, !tools.isEmpty else { return body }
         if tools.count == 1, let only = tools[0].responsesObject, only["type"]?.responsesString == "namespace" {
@@ -92,7 +101,8 @@ enum SIWCBody {
             return body
         }
         for tool in tools {
-            guard tool.responsesObject?["type"]?.responsesString == "function" else { throw Failure(reason: "only function tools are wrapped") }
+            let type = tool.responsesObject?["type"]?.responsesString
+            guard type == "function" || type == "custom" else { throw Failure(reason: "only function and custom tools are wrapped") }
         }
         var out = body
         out["tools"] = .array([.object(["type": .string("namespace"), "name": .string(SIWCEndpoint.namespace),
@@ -116,7 +126,8 @@ enum SIWCBody {
                 if object["type"]?.responsesString == "message" && object["role"]?.responsesString == "system" {
                     throw Failure(reason: "typed system item")
                 }
-                if object["type"]?.responsesString == "function_call", object["namespace"]?.responsesString != SIWCEndpoint.namespace {
+                if let type = object["type"]?.responsesString, namespacedItemTypes.contains(type),
+                   object["namespace"]?.responsesString != SIWCEndpoint.namespace {
                     throw Failure(reason: "call outside the namespace")
                 }
             }

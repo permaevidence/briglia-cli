@@ -103,21 +103,35 @@ enum GPTPatchSwitch {
 enum GPTPatchRoute {
     enum Kind: Equatable { case freeformVerified, jsonOnly }
 
-    /// Freeform is verified only on OpenRouter's Responses endpoint
-    /// (phase-0 probe 2026-11-09: custom grammar tool accepted, custom call
-    /// and string output replayed). That route exists in Briglia as a
-    /// provider server (Responses protocol) whose base is openrouter.ai.
+    /// Freeform is verified (live probes, 2026-11-09, gpt-6-luna) on:
+    /// - OpenRouter's Responses endpoint (phase 0: custom grammar tool
+    ///   accepted, custom call and string output replayed). That route exists
+    ///   in Briglia as a provider server (Responses protocol) whose base is
+    ///   openrouter.ai;
+    /// - the legacy ChatGPT subscription route (stage 3, probe P1: accepted,
+    ///   custom call emitted, string output and native/semantic replay
+    ///   accepted), only at its pinned endpoint;
+    /// - Sign in with ChatGPT (stage 3, probe P2: the same, with the custom
+    ///   tool inside the `briglia` namespace as Briglia sends every tool).
     /// Everything else — Chat Completions (including OpenRouter's main
-    /// provider), both ChatGPT routes, OpenCode, the OpenAI API and any other
-    /// custom endpoint — sends the JSON form until its own probe passes.
+    /// provider), OpenCode, the OpenAI API and any other custom endpoint —
+    /// sends the JSON form until its own probe passes.
     static let freeformHosts: Set<String> = ["openrouter.ai"]
     /// Selftest seam: a loopback fixture server stands in for openrouter.ai.
     nonisolated(unsafe) static var freeformHostsOverrideForTesting: Set<String>?
 
     static func kind(_ context: ProviderExecutionContext) -> Kind {
-        guard context.wireProtocol == .responses, context.siwc == nil, context.siwcFailure == nil,
-              context.subscriptionGeneration == nil,
-              let host = URL(string: (try? ResponsesAdapter.endpoint(context.endpoint)) ?? "")?.host?.lowercased(),
+        guard context.wireProtocol == .responses else { return .jsonOnly }
+        // SIWC: every request goes to the one fixed SIWC URL (SIWCBody
+        // checkDestination), whatever the context's endpoint string says.
+        if context.siwc != nil || context.siwcFailure != nil { return .freeformVerified }
+        if context.subscriptionGeneration != nil {
+            // Legacy ChatGPT: only the pinned inference endpoint, compared as
+            // the adapter does (any other endpoint is refused before sending).
+            return context.endpoint == SubscriptionEndpoint.inference ? .freeformVerified : .jsonOnly
+        }
+        let normalized = (try? ResponsesAdapter.endpoint(context.endpoint)) ?? ""
+        guard let host = URL(string: normalized)?.host?.lowercased(),
               (freeformHostsOverrideForTesting ?? freeformHosts).contains(host) else { return .jsonOnly }
         return .freeformVerified
     }

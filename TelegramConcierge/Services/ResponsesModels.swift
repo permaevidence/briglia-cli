@@ -207,8 +207,11 @@ enum ResponsesRoundDecoder {
             case "custom_tool_call":
                 // GPT_APPLY_PATCH_PLAN §5.3: only the exposed freeform
                 // apply_patch; stored function-shaped as canonical
-                // {"input": …}, replay entry type custom_tool_call.
-                guard requiredNamespace == nil, let callID = item["call_id"]?.responsesString, !callID.isEmpty,
+                // {"input": …}, replay entry type custom_tool_call. SIWC
+                // (stage 3): the call must carry the advertised namespace,
+                // exactly like a function call.
+                guard requiredNamespace == nil || item["namespace"]?.responsesString == requiredNamespace,
+                      let callID = item["call_id"]?.responsesString, !callID.isEmpty,
                       callIDs.insert(callID).inserted,
                       let name = item["name"]?.responsesString, allowedTools.contains(name), freeformTools.contains(name),
                       let input = item["input"]?.responsesString else {

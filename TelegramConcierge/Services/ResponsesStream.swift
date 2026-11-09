@@ -21,6 +21,10 @@ struct ResponsesStreamAssembler {
     private var texts: [String: [Int: String]] = [:]
     private var sequences: [Int: String] = [:]
     private var records = 0
+    /// True once the stream announced any output item or delta (text,
+    /// refusal or arguments). The §5.6 streamed-refusal rule requires a
+    /// terminal answer with no output at all (GPT_APPLY_PATCH_PLAN stage 3).
+    private(set) var sawOutput = false
 
     mutating func append(_ bytes: Data) throws {
         total += bytes.count
@@ -81,6 +85,11 @@ struct ResponsesStreamAssembler {
             "response.function_call_arguments.delta", "response.output_text.delta", "response.refusal.delta",
             "response.completed", "response.failed", "response.incomplete", "error"
         ]
+        // Any output-bearing informational event (custom-tool input, reasoning
+        // and content-part deltas…) also counts as output for the streamed
+        // refusal rule; conservative: more output, fewer classifications.
+        if type.hasSuffix(".delta") || type.hasPrefix("response.output_") || type.hasPrefix("response.content_part")
+            || type.hasPrefix("response.reasoning") || type.hasPrefix("response.custom_tool_call") { sawOutput = true }
         guard semanticEvents.contains(type) else { return }
         if type == "error" {
             if siwc, let failure = SIWCErrors.streamed(event) { throw failure }
@@ -95,6 +104,7 @@ struct ResponsesStreamAssembler {
             }
             try identify(id)
         case "response.output_item.added", "response.output_item.done":
+            sawOutput = true
             guard let index = event["output_index"]?.responsesInt, index >= 0, index < ResponsesLimits.items,
                   let id = event["item"]?.responsesObject?["id"]?.responsesString else {
                 throw ResponsesFailure.malformed("stream item identity")
@@ -109,10 +119,12 @@ struct ResponsesStreamAssembler {
                 completedItems[index] = item
             }
         case "response.function_call_arguments.delta":
+            sawOutput = true
             let (id, delta) = try deltaFields(event)
             arguments[id, default: ""] += delta
             guard arguments[id]!.utf8.count <= ResponsesLimits.argumentBytes else { throw ResponsesFailure.overflow }
         case "response.output_text.delta", "response.refusal.delta":
+            sawOutput = true
             let (id, delta) = try deltaFields(event)
             guard let index = event["content_index"]?.responsesInt, index < ResponsesLimits.items else {
                 throw ResponsesFailure.malformed("stream content index")
@@ -246,6 +258,9 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
     /// request that carried an image (ProviderImageRejection).
     private var requestBody: Data?
     private var assembler = ResponsesStreamAssembler()
+    /// Whether this attempt's stream carried any output item or delta (the
+    /// §5.6 streamed-refusal rule needs "none"). False for a non-streamed body.
+    var streamedOutput: Bool { lock.lock(); defer { lock.unlock() }; return streamed && assembler.sawOutput }
     private var overallTimer: DispatchWorkItem?
     private var phaseTimer: DispatchWorkItem?
     private var phaseGeneration: UInt64 = 0
@@ -409,7 +424,16 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
             if let error { throw error }
             guard let response else { throw ResponsesFailure.disconnected }
             guard response.statusCode == 200 else {
-                if assembler.siwc, let failure = SIWCErrors.classify(status: response.statusCode, body: data) { throw failure }
+                if assembler.siwc, let failure = SIWCErrors.classify(status: response.statusCode, body: data) {
+                    // GPT_APPLY_PATCH_PLAN §5.6 (stage 3): SIWC refusing the
+                    // freeform entry itself (unsupported_capability naming it)
+                    // takes the JSON fallback; every other SIWC error is as today.
+                    if let custom = GPTCustomToolRejection.classifySIWCCapability(status: response.statusCode, rawBody: data,
+                                                                                   requestBody: requestBody, underlying: failure) {
+                        throw custom
+                    }
+                    throw failure
+                }
                 if assembler.subscription, let failure = SubscriptionEndpoint.providerError(status: response.statusCode, body: data) {
                     throw failure
                 }

@@ -66,6 +66,13 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         static let standard = Policy(maxRequestLine: 2048, rfc3986Query: false, refusalText: nil)
         static let oauthCallback = Policy(maxRequestLine: 8192, rfc3986Query: true, refusalText:
             "Briglia could not use this sign-in address. If Briglia is still waiting, copy the whole address from this tab's address bar and paste it into Briglia.")
+        /// The legacy ChatGPT browser sign-in's loopback listener (port 1455):
+        /// the same limits and query bytes as `oauthCallback` (OpenAI's real
+        /// callback carries a `+`-joined `scope`, which `standard` refused with
+        /// an empty 400 so Safari spun; GPT_APPLY_PATCH stage 3). That flow has
+        /// no paste-back, so its refusal page says to start again instead.
+        static let legacyOAuthCallback = Policy(maxRequestLine: 8192, rfc3986Query: true, refusalText:
+            "Briglia could not use this sign-in address. Return to Briglia and start the ChatGPT sign-in again.")
     }
 
     static let maxRequestLine = Policy.standard.maxRequestLine

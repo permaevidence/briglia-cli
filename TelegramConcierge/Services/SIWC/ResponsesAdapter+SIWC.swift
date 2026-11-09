@@ -36,6 +36,10 @@ extension ResponsesAdapter {
                 throw ResponsesFailure.malformed("duplicate exposed tool name")
             }
             body["tools"] = .array(try tools.map { tool in
+                // GPT_APPLY_PATCH_PLAN §5.2 (stage 3, probe P2): the freeform
+                // grammar tool in apply_patch's slot; SIWCBody wraps it into
+                // the `briglia` namespace with every other tool.
+                if context.editing.form == .freeform, tool.function.name == "apply_patch" { return GPTFreeform.customToolEntry() }
                 let parameters = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(tool.function.parameters))
                 return .object(["type": .string("function"), "name": .string(tool.function.name),
                     "description": .string(MarkerNeutralizer.escape(tool.function.description)),
@@ -154,8 +158,8 @@ extension ResponsesAdapter {
                 try Task.checkCancellation()
                 // A sign-out that landed while the stream ran: nothing delivered.
                 try SIWCFence.shared.check(source.fenceKey, capturedEpoch: source.epoch)
-                let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt,
-                                                             allowedTools: allowed, requiredNamespace: SIWCEndpoint.namespace)
+                let round = try Self.decodeRound(bytes, request: request, context: context, receipt: receipt, allowed: allowed,
+                                                 requiredNamespace: SIWCEndpoint.namespace, streamedOutput: transport.streamedOutput)
                 completed = true
                 SIWCPlanState.observe(planTicket, .success)
                 if !round.calls.isEmpty {

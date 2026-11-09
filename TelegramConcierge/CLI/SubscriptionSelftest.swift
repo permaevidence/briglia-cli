@@ -229,10 +229,23 @@ struct SubscriptionSelftest: AsyncParsableCommand {
             defer { session.invalidateAndCancel() }
             let (_, invalid) = try await session.data(from: URL(string: "http://127.0.0.1:1455/auth/callback?state=wrong&code=browser-fixture")!)
             c.check("real loopback listener rejects wrong state", (invalid as? HTTPURLResponse)?.statusCode == 400)
-            let (_, valid) = try await session.data(from: URL(string: "http://127.0.0.1:1455/auth/callback?state=\(state)&code=browser-fixture")!)
-            c.check("real loopback listener accepts own state", (valid as? HTTPURLResponse)?.statusCode == 200)
+            // OpenAI's real legacy callback (probe 2026-11-09: code, scope,
+            // state) carries a `+`-joined scope; the old `.standard` listener
+            // answered it with an empty 400 (Safari spun). Through the REAL
+            // listener started by browser(), as the browser sends it.
+            let realShaped = "http://127.0.0.1:1455/auth/callback?code=browser-fixture&scope=openid+profile+email+offline_access&state=\(state)"
+            let (validBody, valid) = try await session.data(from: URL(string: realShaped)!)
+            c.check("real loopback listener accepts OpenAI's real-shaped callback (code, +-joined scope, state)",
+                    (valid as? HTTPURLResponse)?.statusCode == 200
+                    && String(decoding: validBody, as: UTF8.self).contains("Authorization received"))
+            if (valid as? HTTPURLResponse)?.statusCode != 200 {
+                // Already reported above; finish the flow with a minimal
+                // callback so a regression fails fast instead of waiting 5 min.
+                _ = try? await session.data(from: URL(string: "http://127.0.0.1:1455/auth/callback?state=\(state)&code=browser-fixture")!)
+            }
         }
         c.check("browser flow exchanges and commits own credentials", try browserStore.read()?.generation == browserGeneration)
+        try await Self.legacyListenerPolicyTests(c)
         let stopped = QuickSetupHTTPServer(port: 1455, reuseAddress: true) { _ in .status(400) }
         try stopped.start(); stopped.stop()
         c.check("browser listener releases fixed port after completion", true)
@@ -243,5 +256,41 @@ struct SubscriptionSelftest: AsyncParsableCommand {
         }
         await c.rejects("denied device authorization is explicit") { _ = try await revoked.device { _, _ in } }
         c.check("failed replacement login preserves prior account", try store.read()?.generation == generation)
+    }
+
+    /// The legacy browser listener's policy (GPT_APPLY_PATCH stage 3 fix):
+    /// real-shaped callbacks through a real server with the production
+    /// policy, the `%20` scope variant, a ~2 KB code, and a readable refusal.
+    static func legacyListenerPolicyTests(_ c: Checks) async throws {
+        c.check("legacy browser listener uses the OAuth callback limits (8 KiB line, RFC 3986 query)",
+                SubscriptionLogin.callbackPolicy.maxRequestLine == 8192 && SubscriptionLogin.callbackPolicy.rfc3986Query
+                && SubscriptionLogin.callbackPolicy != .standard)
+        let state = SubscriptionLogin.randomURLToken()
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3; config.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        func serve(_ query: String) async throws -> (Int?, String) {
+            let callback = SubscriptionBrowserCallback(state: state)
+            let server = QuickSetupHTTPServer(port: 0, policy: SubscriptionLogin.callbackPolicy) { request in
+                var copy = request
+                copy.headers["host"] = "localhost:1455"   // the fixed port's Host, as the browser sends it
+                return await callback.receive(copy)
+            }
+            try server.start()
+            defer { server.stop() }
+            let (body, response) = try await session.data(from: URL(string: "http://127.0.0.1:\(server.port)/auth/callback?" + query)!)
+            return ((response as? HTTPURLResponse)?.statusCode, String(decoding: body, as: UTF8.self))
+        }
+        let (plus, _) = try await serve("code=ac_fixture-123&scope=openid+profile+email+offline_access&state=\(state)")
+        c.check("legacy listener: `+`-joined scope accepted", plus == 200)
+        let (encoded, _) = try await serve("code=ac_fixture-123&scope=openid%20profile%20email%20offline_access&state=\(state)")
+        c.check("legacy listener: `%20`-joined scope accepted", encoded == 200)
+        let longCode = String(repeating: "aB3-_", count: 400)   // 2,000 bytes, like an SIWC-era code
+        let (long, _) = try await serve("code=\(longCode)&scope=openid+profile+email+offline_access&state=\(state)")
+        c.check("legacy listener: a ~2 KB code in a >2 KB request line accepted", long == 200)
+        let (refused, refusalText) = try await serve("code=x&state=wrong")
+        c.check("legacy listener: a refusal is a readable page that says to start again (no paste-back promise)",
+                refused == 400 && refusalText.contains("start the ChatGPT sign-in again") && !refusalText.contains("paste"))
     }
 }

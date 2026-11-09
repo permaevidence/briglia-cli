@@ -236,9 +236,8 @@ struct ResponsesAdapter {
                     subscription: context.subscriptionGeneration != nil)
                 counts = ResponsesUsageCounts.parse(bytes)
                 try Task.checkCancellation()
-                let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed,
-                                                             blockedForeignNames: Self.blockedForeignNames(context.editing, exposed: allowed),
-                                                             freeformTools: Self.freeformTools(context, exposed: allowed))
+                let round = try Self.decodeRound(bytes, request: request, context: context, receipt: receipt, allowed: allowed,
+                                                 requiredNamespace: nil, streamedOutput: transport.streamedOutput)
                 completed = true
                 DebugTelemetry.log(.info, summary: "Responses usage",
                     detail: "input=\(round.inputTokens.map(String.init) ?? "unknown") output=\(round.outputTokens.map(String.init) ?? "unknown") cached_input=\(round.metadata.cachedInputTokens.map(String.init) ?? "unknown") reasoning_output_subset=\(round.metadata.reasoningTokens.map(String.init) ?? "unknown")")
@@ -398,6 +397,32 @@ extension ResponsesAdapter {
 }
 
 extension ResponsesAdapter {
+    /// Decodes one round of either Responses route (API/subscription or SIWC)
+    /// with the editing configuration's freeform set and bounded foreign-call
+    /// repair. A terminal `failed`/`incomplete` answer that is a genuine
+    /// refusal of the freeform patch tool (GPT_APPLY_PATCH_PLAN §5.6, stage 3
+    /// streamed shapes) is rethrown as `GPTCustomToolRejection.Rejected`, so
+    /// the run's one freeform → JSON transition applies; every other decode
+    /// error is unchanged.
+    static func decodeRound(_ bytes: Data, request: URLRequest, context: ProviderExecutionContext,
+                            receipt: PreparedRequestReceipt, allowed: Set<String>, requiredNamespace: String?,
+                            streamedOutput: Bool) throws -> ResponsesRound {
+        do {
+            return try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed,
+                                                    requiredNamespace: requiredNamespace,
+                                                    blockedForeignNames: blockedForeignNames(context.editing, exposed: allowed),
+                                                    freeformTools: freeformTools(context, exposed: allowed))
+        } catch {
+            let chatGPTRoute = context.subscriptionGeneration != nil || context.siwc != nil || context.siwcFailure != nil
+            if let refusal = GPTCustomToolRejection.classifyTerminal(bytes, requestBody: request.httpBody,
+                                                                     chatGPTRoute: chatGPTRoute, streamedOutput: streamedOutput,
+                                                                     underlying: error) {
+                throw refusal
+            }
+            throw error
+        }
+    }
+
     /// The names a round may return as `custom_tool_call` (§5.3): the
     /// exposed apply_patch in a freeform request; none otherwise.
     static func freeformTools(_ context: ProviderExecutionContext, exposed: Set<String>) -> Set<String> {

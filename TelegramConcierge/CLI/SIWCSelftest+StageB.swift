@@ -60,7 +60,7 @@ extension SIWCSelftest {
         var foreign = base; foreign["tools"] = .array([.object(["type": .string("namespace"), "name": .string("other"), "tools": .array([fn])])])
         c.check("body: a foreign tool namespace is refused", normalizes(foreign, prompt) == nil)
         var hosted = base; hosted["tools"] = .array([.object(["type": .string("web_search")])])
-        c.check("body: only function tools are wrapped", normalizes(hosted, prompt) == nil)
+        c.check("body: only function (and the freeform custom) tools are wrapped", normalizes(hosted, prompt) == nil)
         // Replay.
         let call: JSONValue = .object(["type": .string("function_call"), "call_id": .string("c1"), "name": .string("grep"), "arguments": .string("{}")])
         var replay = base; replay["input"] = .array([sys(prompt), call, .object(["type": .string("function_call_output"), "call_id": .string("c1"), "output": .string("x")])])

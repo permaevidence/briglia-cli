@@ -23,8 +23,12 @@ LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 S = "TelegramConcierge/Services/"
 C = S + "CodexPatch/"
 FIXTURES = ROOT / "scripts/fixtures/codex-apply-patch"
+# Which selftest a break is judged by (default: the GPT profile selftest).
+GP_RUN = ["__gpt-profile-selftest", "--fixtures", str(FIXTURES)]
+SIWC_RUN = ["__siwc-selftest", "--only", "gpt-patch"]
+SUB_RUN = ["__subscription-selftest"]
 
-# (id label, failing check prefix, [(file, old, new), ...])
+# (id label, failing check prefix, [(file, old, new), ...][, selftest args])
 BREAKS = [
     ("P13 .standard list includes the GPT apply_patch", "U .standard list is byte-identical", [("TelegramConcierge/Models/ToolModels+GPT.swift",
         "        guard editing.isGPT else { return tools }", "        guard editing.isGPT else { return tools + [applyPatchGPT] }")]),
@@ -42,9 +46,15 @@ BREAKS = [
         "        guard let slash = trimmed.lastIndex(of: \"/\") else { return trimmed }", "        guard let slash = trimmed.lastIndex(of: \"/\"), false else { return trimmed }")]),
     ("A1d freeform on an unverified route", "R OpenAI key (api.openai.com Responses) → JSON", [(C + "GPTEditing.swift",
         "    static let freeformHosts: Set<String> = [\"openrouter.ai\"]", "    static let freeformHosts: Set<String> = [\"openrouter.ai\", \"api.openai.com\"]")]),
-    ("P17 SIWC route not excluded from freeform", "R Sign in with ChatGPT route → JSON", [(C + "GPTEditing.swift",
-        "        guard context.wireProtocol == .responses, context.siwc == nil, context.siwcFailure == nil,",
-        "        guard context.wireProtocol == .responses,")]),
+    ("P17 SIWC route not freeform (stage 3)", "R Sign in with ChatGPT route → freeform", [(C + "GPTEditing.swift",
+        "        if context.siwc != nil || context.siwcFailure != nil { return .freeformVerified }",
+        "        if context.siwc != nil || context.siwcFailure != nil { return .jsonOnly }")]),
+    ("N0 legacy ChatGPT endpoint not pinned", "R legacy ChatGPT credential on any other endpoint → JSON", [(C + "GPTEditing.swift",
+        "            return context.endpoint == SubscriptionEndpoint.inference ? .freeformVerified : .jsonOnly",
+        "            return .freeformVerified")]),
+    ("N0b legacy ChatGPT route not freeform", "R legacy ChatGPT route at its pinned endpoint → freeform", [(C + "GPTEditing.swift",
+        "            return context.endpoint == SubscriptionEndpoint.inference ? .freeformVerified : .jsonOnly",
+        "            return .jsonOnly")]),
     ("P29 switch ignored", "R stored off read by the switch", [(C + "GPTEditing.swift",
         "    static var isOn: Bool { storedOn && !environmentForcesOff }", "    static var isOn: Bool { !environmentForcesOff }")]),
     ("P30 environment variable ignored", "R BRIGLIA_GPT_PATCH=0 forces off", [(C + "GPTEditing.swift",
@@ -123,8 +133,8 @@ BREAKS = [
     ("R4d last release does not retire", "L the last release retires the scope", [(S + "ToolExecutor+GPTPatch.swift",
         "        if left == 0, running[scope] == nil {\n            settled.removeValue(forKey: scope)", "        if left == 0, running[scope] == nil, false {\n            settled.removeValue(forKey: scope)")]),
     ("R5 description error classified", "X does not classify the entry's description", [(C + "GPTFreeform.swift",
-        "                let typeOrFormat = param == base + \".type\" || param == base + \".format\"",
-        "                let typeOrFormat = param.hasPrefix(base + \".\") || param == base + \".format\"")]),
+        "        param == base + \".type\" || param == base + \".format\" || param.hasPrefix(base + \".format.\")",
+        "        param.hasPrefix(base + \".\") || param == base + \".format\" || param.hasPrefix(base + \".format.\")")]),
     ("S8 stale receipt published", "K a receipt for a version that changed before delivery is not published", [(S + "ToolExecutor+GPTPatch.swift",
         "            guard let now = try? FileIdentity.lstatPath(receipt.key), now.sameState(as: receipt.identity) else { continue }\n            guard await FileTimeTracker.shared.publishGPTIfAdmitted(receipt) else { return }",
         "            guard await FileTimeTracker.shared.publishGPTIfAdmitted(receipt) else { return }")]),
@@ -151,7 +161,7 @@ BREAKS = [
     ("S11 stamp not copied", "W the call carries the producing request's stamp", [(S + "ToolArgumentHint.swift",
         "            copy.editing = editing\n", "")]),
     ("P41 classifier accepts a generic tools 400", "X does not classify a generic `tools` error", [(C + "GPTFreeform.swift",
-        "                if typeOrFormat || (param == base && typeCodes.contains(code)) {", "                if param.hasPrefix(\"tools\") {")]),
+        "                if namesTypeOrFormat(param, entry.param) || (param == entry.param && typeCodes.contains(code)) {", "                if param.hasPrefix(\"tools\") {")]),
     ("S12 unknown code classified", "X does not classify an unknown code", [(C + "GPTFreeform.swift",
         "            guard let param = error[\"param\"] as? String, let code = error[\"code\"] as? String, refusalCodes.contains(code) else { continue }",
         "            guard let param = error[\"param\"] as? String, let code = error[\"code\"] as? String else { continue }")]),
@@ -161,12 +171,13 @@ BREAKS = [
     ("L2 live grammar refusal not recognised", "X live fixture or-badgrammar-openai.json: classified = true", [(C + "GPTFreeform.swift",
         "            if message.hasPrefix(larkRefusalPrefix) {", "            if message.hasPrefix(larkRefusalPrefix), false {")]),
     ("L3 OpenRouter validation refusal not recognised", "X live fixture or-badsyntax.json: classified = true", [(C + "GPTFreeform.swift",
-        "            guard path.count == 2, path[0] as? String == \"tools\", let k = path[1] as? Int, indices.contains(k) else { continue }",
-        "            guard path.count == 2, path[0] as? String == \"tools\", let k = path[1] as? Int, indices.contains(k), false else { continue }")]),
+        "            guard let entry = entries.first(where: { $0.path == path }) else { continue }",
+        "            guard let entry = entries.first(where: { $0.path == path }), false else { continue }")]),
     ("L4 any `tools` refusal classified", "X live `tools` refusal naming another type is not classified", [(C + "GPTFreeform.swift",
         "refusalCodes.contains(code), message.contains(\"'custom'\") {", "refusalCodes.contains(code) {")]),
     ("L5 validation index not checked", "X live validation refusal at another tool's index is not classified", [(C + "GPTFreeform.swift",
-        "let k = path[1] as? Int, indices.contains(k) else { continue }", "let k = path[1] as? Int else { continue }")]),
+        "            guard let entry = entries.first(where: { $0.path == path }) else { continue }",
+        "            guard let entry = entries.first(where: { $0.path.count == path.count }) else { continue }")]),
     ("L6 refusal code not required on the `tools` rule", "X live `tools` refusal with a non-refusal code is not classified", [(C + "GPTFreeform.swift",
         "            if let code = error[\"code\"] as? String, refusalCodes.contains(code), message.contains(\"'custom'\") {",
         "            if let code = error[\"code\"] as? String, message.contains(\"'custom'\") {")]),
@@ -179,6 +190,69 @@ BREAKS = [
         "            let first = GPTPatchFormStore.shared.recordRejection(GPTPatchRoute.key(context))", "            let first = true")]),
     ("S14 prompt bullet not switched", "P GPT system prompt: no `edit_file` anywhere", [(S + "OpenRouterService+Preparation.swift",
         "        guard editing.isGPT else { return standardEditingBullet() }", "        guard editing.isGPT, false else { return standardEditingBullet() }")]),
+    # Stage 3 (ChatGPT routes, namespaced classifier, streamed refusals).
+    ("N1 namespaced custom entries ignored", "Y classifies a namespaced entry's format", [(C + "GPTFreeform.swift",
+        "            } else if tool[\"type\"] as? String == \"namespace\", let inner = tool[\"tools\"] as? [[String: Any]] {",
+        "            } else if false, let inner = tool[\"tools\"] as? [[String: Any]] {")]),
+    ("N2 the namespace itself counted as the entry", "Y does not classify the namespace itself", [(C + "GPTFreeform.swift",
+        "                for (j, entry) in inner.enumerated() where entry[\"type\"] as? String == \"custom\" {",
+        "                out.append(CustomEntry(param: \"tools[\\(i)]\", path: [.key(\"tools\"), .index(i)]))\n                for (j, entry) in inner.enumerated() where entry[\"type\"] as? String == \"custom\" {")]),
+    ("C1 SIWC capability refusal not routed to the fallback", "Y SIWC transport: unsupported_capability at the custom entry", [(S + "ResponsesStream.swift",
+        "                    if let custom = GPTCustomToolRejection.classifySIWCCapability(",
+        "                    if false, let custom = GPTCustomToolRejection.classifySIWCCapability(")]),
+    ("C2 SIWC capability rule ignores the param", "Y SIWC unsupported_capability elsewhere does not classify", [(C + "GPTFreeform.swift",
+        "        guard entries.contains(where: { param == $0.param || namesTypeOrFormat(param, $0.param) }) else { return nil }\n", "")]),
+    ("T1 streamed grammar refusal not recognised", "Y live SSE fixture or-badgrammar.json: stream-classified = true", [(C + "GPTFreeform.swift",
+        "                  message.hasPrefix(larkRefusalPrefix) else { return nil }",
+        "                  message.hasPrefix(larkRefusalPrefix), false else { return nil }")]),
+    ("T2 any streamed failure classified", "Y live SSE fixture or-badgrammar-bedrock.json: stream-classified = false", [(C + "GPTFreeform.swift",
+        "            guard let error = object[\"error\"] as? [String: Any], let message = error[\"message\"] as? String,\n                  message.hasPrefix(larkRefusalPrefix) else { return nil }",
+        "            guard object[\"error\"] is [String: Any] else { return nil }")]),
+    ("T3 empty incomplete classified on every route", "Y empty incomplete on a non-ChatGPT route never classifies", [(C + "GPTFreeform.swift",
+        "            guard chatGPTRoute else { return nil }\n", "")]),
+    ("T4 ordinary incomplete reasons classified", "Y ChatGPT incomplete: max_output_tokens is ordinary", [(C + "GPTFreeform.swift",
+        "                if let reason = details[\"reason\"] as? String, ordinaryIncompleteReasons.contains(reason) { return nil }\n", "")]),
+    ("T5 output tokens ignored", "Y ChatGPT incomplete with output tokens is ordinary", [(C + "GPTFreeform.swift",
+        "let outputTokens = usage[\"output_tokens\"] as? Int, outputTokens > 0 {",
+        "let outputTokens = usage[\"output_tokens\"] as? Int, outputTokens > 0, false {")]),
+    ("T6 streamed output ignored", "Y ChatGPT incomplete with a streamed output item is ordinary", [(C + "GPTFreeform.swift",
+        "        guard !streamedOutput, bytes.count <= 64 * 1024, !customEntries(requestBody).isEmpty,",
+        "        guard bytes.count <= 64 * 1024, !customEntries(requestBody).isEmpty,")]),
+    ("T7 assembler does not record streamed output", "Y ChatGPT incomplete with a streamed output item is ordinary", [
+        (S + "ResponsesStream.swift", "        if type.hasSuffix(\".delta\") || type.hasPrefix(\"response.output_\") || type.hasPrefix(\"response.content_part\")",
+         "        if type.hasSuffix(\".delta\") || type.hasPrefix(\"response.content_part\")"),
+        (S + "ResponsesStream.swift", "        case \"response.output_item.added\", \"response.output_item.done\":\n            sawOutput = true\n",
+         "        case \"response.output_item.added\", \"response.output_item.done\":\n")]),
+    ("T8 terminal output ignored", "Y incomplete with terminal output is ordinary", [(C + "GPTFreeform.swift",
+        "            guard let items = output as? [Any], items.isEmpty else { return nil }",
+        "            guard output is [Any] else { return nil }")]),
+    ("T9 decode does not classify streamed refusals", "Y decodeRound: a ChatGPT empty incomplete becomes", [(S + "ResponsesAdapter.swift",
+        "            if let refusal = GPTCustomToolRejection.classifyTerminal(",
+        "            if false, let refusal = GPTCustomToolRejection.classifyTerminal(")]),
+    ("T10 every route treated as ChatGPT", "Y decodeRound: the same terminal elsewhere stays an ordinary incomplete", [(S + "ResponsesAdapter.swift",
+        "            let chatGPTRoute = context.subscriptionGeneration != nil || context.siwc != nil || context.siwcFailure != nil",
+        "            let chatGPTRoute = true")]),
+    ("W3 legacy request keeps apply_patch a function", "Y legacy ChatGPT request: Codex grammar tool", [(S + "ResponsesAdapter.swift",
+        "                if context.editing.form == .freeform, tool.function.name == \"apply_patch\" { return GPTFreeform.customToolEntry() }",
+        "                if context.editing.form == .freeform, tool.function.name == \"apply_patch\", context.subscriptionGeneration == nil { return GPTFreeform.customToolEntry() }")]),
+    # SIWC wire (run in __siwc-selftest --only gpt-patch).
+    ("S3a SIWC request without the grammar tool", "gpt-patch: request: every tool inside", [(S + "SIWC/ResponsesAdapter+SIWC.swift",
+        "                if context.editing.form == .freeform, tool.function.name == \"apply_patch\" { return GPTFreeform.customToolEntry() }\n", "")], SIWC_RUN),
+    ("S3b SIWC namespace refuses the custom tool", "gpt-patch: request: every tool inside", [(S + "SIWC/SIWCBody.swift",
+        "            guard type == \"function\" || type == \"custom\" else {", "            guard type == \"function\" else {")], SIWC_RUN),
+    ("S3c replayed custom call not namespaced", "gpt-patch: native replay", [(S + "SIWC/SIWCBody.swift",
+        "    static let namespacedItemTypes: Set<String> = [\"function_call\", \"custom_tool_call\"]",
+        "    static let namespacedItemTypes: Set<String> = [\"function_call\"]")], SIWC_RUN),
+    ("S3d decoder ignores the namespace on custom calls", "gpt-patch: decoder refuses a custom call with a missing namespace", [(S + "ResponsesModels.swift",
+        "                guard requiredNamespace == nil || item[\"namespace\"]?.responsesString == requiredNamespace,",
+        "                guard true,")], SIWC_RUN),
+    # Legacy browser sign-in listener (run in __subscription-selftest).
+    ("B1 legacy browser listener back on the standard policy", "real loopback listener accepts OpenAI's real-shaped callback", [(S + "SubscriptionBrowserLogin.swift",
+        "    static let callbackPolicy = QuickSetupHTTPServer.Policy.legacyOAuthCallback",
+        "    static let callbackPolicy = QuickSetupHTTPServer.Policy.standard")], SUB_RUN),
+    ("B2 legacy refusal page promises a paste-back", "legacy listener: a refusal is a readable page", [(S + "SubscriptionBrowserLogin.swift",
+        "    static let callbackPolicy = QuickSetupHTTPServer.Policy.legacyOAuthCallback",
+        "    static let callbackPolicy = QuickSetupHTTPServer.Policy.oauthCallback")], SUB_RUN),
 ]
 
 
@@ -194,16 +268,16 @@ def build(tree, scratch):
     return Path(out) / "briglia"
 
 
-def selftest(binary, workdir):
+def selftest(binary, workdir, args=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BRIGLIA_")}
     env["XDG_CONFIG_HOME"] = str(Path(workdir) / "outer-config")
     env["XDG_DATA_HOME"] = str(Path(workdir) / "outer-data")
-    return run([str(binary), "__gpt-profile-selftest", "--fixtures", str(FIXTURES)], workdir, timeout=900, env=env)
+    return run([str(binary), *(args or GP_RUN)], workdir, timeout=900, env=env)
 
 
 def check_anchors():
     bad = 0
-    for label, _, edits in BREAKS:
+    for label, _, edits, *_ in BREAKS:
         for rel, old, _ in edits:
             n = (ROOT / rel).read_text().count(old)
             if n != 1:
@@ -232,13 +306,14 @@ def main():
     failures = executed = 0
     try:
         binary = build(tree, scratch)
-        r = selftest(binary, work)
-        ok = r.returncode == 0
-        print(("✔" if ok else "✖") + " positive control: the unmodified copy passes", flush=True)
-        if not ok:
-            print((r.stdout + r.stderr)[-3000:])
-            return 1
-        for label, prefix, edits in BREAKS:
+        for args in (GP_RUN, SIWC_RUN, SUB_RUN):
+            r = selftest(binary, work, args)
+            ok = r.returncode == 0
+            print(("✔" if ok else "✖") + f" positive control: the unmodified copy passes {args[0]}", flush=True)
+            if not ok:
+                print((r.stdout + r.stderr)[-3000:])
+                return 1
+        for label, prefix, edits, *rest in BREAKS:
             if args.only and label.split()[0] not in args.only.split(","):
                 continue
             originals = {}
@@ -252,7 +327,7 @@ def main():
                     originals.setdefault(rel, text)
                     path.write_text(current.replace(old, new))
                 binary = build(tree, scratch)
-                r = selftest(binary, work)
+                r = selftest(binary, work, rest[0] if rest else None)
                 failed = [l for l in r.stdout.splitlines() if l.startswith("✖")]
                 caught = r.returncode != 0 and any(l.startswith(f"✖ {prefix}") for l in failed)
                 print(("✔" if caught else "✖") + f" {label}: '{prefix}' fails"

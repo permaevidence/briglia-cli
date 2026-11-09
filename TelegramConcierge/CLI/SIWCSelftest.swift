@@ -113,6 +113,8 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("effort-max", Self.maxEffortTests),
             // 0.2.70: settings commands reuse their own commit token (Telegram /subscription deadlock).
             ("cmd-token", Self.commandTokenTests),
+            // 0.2.71: GPT apply_patch stage 3 (freeform inside the namespace, §5.6 on SIWC).
+            ("gpt-patch", Self.gptPatchTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")

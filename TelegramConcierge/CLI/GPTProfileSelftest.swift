@@ -91,6 +91,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         if t.runs("H") { shellReadTests(t) }
         if t.runs("W") { await wireTests(t) }
         if t.runs("X") { await transitionTests(t) }
+        if t.runs("Y") { await stage3Tests(t) }
         GPTPatchSwitch.storedOverrideForTesting = nil
         GPTPatchRoute.freeformHostsOverrideForTesting = nil
         GPTPatchFormStore.fileURLOverrideForTesting = nil
@@ -150,12 +151,20 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         t.check("R custom endpoint chat → JSON", resolve(chat("gpt-6-sol", provider: .openAICompatible, endpoint: "https://llm.example.com/v1")) == .gptJSON)
         t.check("R OpenRouter host spoof in a path is not OpenRouter",
                 resolve(responses("gpt-6-sol", base: "https://evil.example.com/openrouter.ai/v1")) == .gptJSON)
-        var legacy = responses("gpt-6.1-sol", base: "https://openrouter.ai/api/v1")
+        // Stage 3 (probes P1/P2, 2026-11-09): both ChatGPT routes → freeform.
+        var legacy = responses("gpt-6.1-sol", base: SubscriptionEndpoint.inference)
         legacy.subscriptionGeneration = "g1"
-        t.check("R legacy ChatGPT route → JSON (even on an OpenRouter-looking endpoint)", resolve(legacy) == .gptJSON)
-        var siwc = responses("gpt-6.1-sol", base: "https://openrouter.ai/api/v1")
+        t.check("R legacy ChatGPT route at its pinned endpoint → freeform", resolve(legacy) == .gptFreeform)
+        var legacyElsewhere = responses("gpt-6.1-sol", base: "https://openrouter.ai/api/v1")
+        legacyElsewhere.subscriptionGeneration = "g1"
+        t.check("R legacy ChatGPT credential on any other endpoint → JSON", resolve(legacyElsewhere) == .gptJSON)
+        var siwc = responses("gpt-6.1-sol", base: SIWCEndpoint.apiBase)
         siwc.siwcFailure = "fixture"
-        t.check("R Sign in with ChatGPT route → JSON", resolve(siwc) == .gptJSON)
+        t.check("R Sign in with ChatGPT route → freeform", resolve(siwc) == .gptFreeform)
+        t.check("R ChatGPT routes keep their own route keys", GPTPatchRoute.key(legacy).hasPrefix("chatgpt|")
+                && GPTPatchRoute.key(siwc).hasPrefix("siwc|"))
+        t.check("R non-GPT model on a ChatGPT route → standard",
+                resolve({ var c = responses("deepseek/deepseek-v4.1-flash", base: SubscriptionEndpoint.inference); c.subscriptionGeneration = "g1"; return c }()) == .standard)
         t.check("R non-GPT model on the freeform route → standard", resolve(responses("deepseek/deepseek-v4.1-flash", base: "https://openrouter.ai/api/v1")) == .standard)
         t.check("R gpt-oss → standard", resolve(chat("openai/gpt-oss-120b")) == .standard)
         t.check("R unknown model → standard", resolve(chat("vendor/mystery-1")) == .standard)
