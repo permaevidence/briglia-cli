@@ -209,7 +209,7 @@ extension ConversationManager {
         }
         // }BGPRUNE
         if stillFinishing == nil {
-            let patchOutcomes = stopBatchCallIds.compactMap { GPTPatchSettlement.shared.outcome($0) }
+            let patchOutcomes = observedRun.map { run in stopBatchCallIds.compactMap { GPTPatchSettlement.shared.outcome(scope: GPTPatchSettlement.mainScope(run), callID: $0) } } ?? []
             if !patchOutcomes.isEmpty {
                 text += " " + patchOutcomes.map(GPTPatchSettlement.describe).joined(separator: "; ").capitalizedFirst + "."
             }
@@ -326,7 +326,7 @@ extension ConversationManager {
             let after = Self.stopDuration(Int(Date().timeIntervalSince(entry.stoppedAt)))
             var text = "✅ The stopped request has ended. (it ended \(after) after /stop)"
             // §12.2: a GPT patch that was committing names its real outcome.
-            let patchOutcomes = entry.batchCallIds.compactMap { GPTPatchSettlement.shared.outcome($0) }
+            let patchOutcomes = entry.batchCallIds.compactMap { GPTPatchSettlement.shared.outcome(scope: GPTPatchSettlement.mainScope(run), callID: $0) }
             if !patchOutcomes.isEmpty {
                 text += " " + patchOutcomes.map(GPTPatchSettlement.describe).joined(separator: "; ").capitalizedFirst + "."
             }
@@ -336,6 +336,8 @@ extension ConversationManager {
         }
         gaveUpNoticeSeries.subtract(entry.series.values)
         stoppedRunsFinishing.removeValue(forKey: run)
+        // §12.2: the run's history and notices are done with its patch results.
+        GPTPatchSettlement.shared.retire(scope: GPTPatchSettlement.mainScope(run))
     }
 
     /// "2m 10s"-style durations for the visibility texts.
@@ -361,7 +363,7 @@ extension ConversationManager {
             let shown = labels.prefix(3).joined(separator: ", ") + (labels.count > 3 ? " (+\(labels.count - 3) more)" : "")
             // §12.2: a GPT patch past its last cancellation point runs to
             // commit or rollback.
-            if callIds.contains(where: { GPTPatchSettlement.shared.isCommitting($0) }) {
+            if callIds.contains(where: { GPTPatchSettlement.shared.isCommitting(scope: GPTPatchSettlement.mainScope(runId), callID: $0) }) {
                 return "\(shown) — applying a file edit \(running(since))"
             }
             if let refined = refinedToolStage(callIds: callIds) {

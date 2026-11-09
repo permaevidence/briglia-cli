@@ -186,8 +186,14 @@ extension ConversationManager {
         // Step 1 (awaits first): the execution today's summary resolves.
         let selected: ProviderExecutionContext
         if let execution { selected = execution }
-        else { selected = await openRouterService.executionContext(modelOverride: nil,
-                providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main) }
+        else {
+            let fresh = await openRouterService.executionContext(modelOverride: nil,
+                providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+            // GPT_APPLY_PATCH_PLAN §3.2 (Codex S2 R3): a fresh selection is
+            // admitted through the turn's lease before it is frozen, so the
+            // summary never pairs a new model with the turn's tool surface.
+            selected = inputs.editingRun?.admit(fresh: fresh) ?? fresh
+        }
         let identity = await bgPruneIdentity(selected)
         await bgPruneHold("freeze.afterAwait")
         // Step 2: synchronous re-check after the last await; nothing below

@@ -170,6 +170,8 @@ final class MidturnHarness {
         // Sign in with ChatGPT stage C (Codex round 2): a real turn is a job
         // of its login through its final delivery.
         if section("siwc") { try await siwcTurnSection() }
+        // GPT apply_patch S2 (Codex round 1 R2): /stop during a GPT patch commit.
+        if section("gptpatch") { try await gptPatchOwnerSection() }
     }
 
     // MARK: Provider and scripting

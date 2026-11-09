@@ -46,6 +46,10 @@ extension ConversationManager {
         editingRun.setNotifier { [weak self] text in try? await self?.sendText("ℹ️ " + text) }
         mainRunEditing = editingRun
         defer { if mainRunEditing === editingRun { mainRunEditing = nil } }
+        // §12.2 (Codex S2 R2/R4): this run's GPT patch results are kept under
+        // its own scope until its history and notices consumed them.
+        let gptSettlementScope = salvageRunId.map(GPTPatchSettlement.mainScope) ?? "main:" + UUID().uuidString
+        await toolExecutor.setGPTSettlementScope(gptSettlementScope)
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
         defer { responsesExecution?.responsesTurn.close() }
         // Sign in with ChatGPT: this turn is a job of its captured login; a
@@ -895,6 +899,24 @@ extension ConversationManager {
                     toolInteractions = pending
                 }
                 var toolResults: [ToolResultMessage] = []
+                // §12.2 (Codex S2 R2): a GPT patch that ran in a batch the run
+                // abandons keeps its real result in the interrupted history
+                // (joined, never relabelled); it earns no evidence.
+                func recordInterruptedGPTPatches() async {
+                    let patchIDs = executableCalls.filter(GPTPatchSettlement.isGPTPatchCall).map(\.id)
+                    guard !patchIDs.isEmpty else { return }
+                    let settled = await GPTPatchSettlement.shared.settle(scope: gptSettlementScope, callIDs: patchIDs)
+                    guard let interrupted = GPTPatchSettlement.interruptedRound(assistantMessage, settled: settled,
+                            placeholder: "[Interrupted tool intent: outcome unknown. This call was not automatically rerun; inspect external state before repeating it.]") else { return }
+                    if responsesExecution != nil {
+                        var completed = toolInteractions
+                        completed[completed.count - 1] = interrupted
+                        if ownsSalvageFile(salvageRunId) { try? persistResponsesSalvage(completed) }
+                        toolInteractions = completed
+                    } else {
+                        toolInteractions.append(interrupted)
+                    }
+                }
                 if suppressBatch {
                     toolResults = calls.map(Self.notExecutedResult(for:))
                 } else {
@@ -902,14 +924,22 @@ extension ConversationManager {
                         // Diagnostics: the round number rides on every stage
                         // marker of this batch (a task-local; no behaviour
                         // change).
-                        let executedResults = try await StageMarkers.$round.withValue(round) {
-                            try await toolExecutor.executeParallel(executableCalls)
+                        do {
+                            let executedResults = try await StageMarkers.$round.withValue(round) {
+                                try await toolExecutor.executeParallel(executableCalls)
+                            }
+                            toolResults.append(contentsOf: executedResults)
+                        } catch {
+                            await recordInterruptedGPTPatches()
+                            throw error
                         }
-                        toolResults.append(contentsOf: executedResults)
                     }
                     if !blockedResults.isEmpty {
                         toolResults.append(contentsOf: blockedResults)
                     }
+                }
+                if Task.isCancelled, !suppressBatch {
+                    await recordInterruptedGPTPatches()
                 }
                 try Task.checkCancellation()
                 if let failure = BashTools.lastRecordFailure, !detachRecordFailureShown {

@@ -22,16 +22,14 @@ extension ToolExecutor {
         let token = StageMarkers.enter("fs.read_file", detail: StageMarkers.basename(path))
         // GPT_APPLY_PATCH_PLAN §7 (R3-1): a GPT read binds its evidence to
         // the descriptor identity captured before the bytes are read.
-        let gptProbe = call.editing?.isGPT == true ? Self.gptReadProbe(path: path) : nil
-        let result = await FilesystemTools.shared.readFile(path: path, offset: offset, limit: limit, pages: pages)
+        let observation = call.editing?.isGPT == true ? GPTReadObservation(path: path) : nil
+        let result = await FilesystemTools.shared.readFile(path: path, offset: offset, limit: limit, pages: pages,
+                                                           gptObservation: observation)
         StageMarkers.exit(token, result.content.contains("\"error\"") ? .error : .ok)
         var message = ToolResultMessage(toolCallId: call.id, content: result.content, fileAttachments: result.attachments)
-        if let gptProbe {
-            if result.attachments.isEmpty, let receipt = Self.gptReadReceipt(gptProbe, path: path, resultContent: result.content) {
-                message.gptEvidence = GPTEvidenceSettlement(receipts: [receipt])
-            } else if !result.attachments.isEmpty {
-                close(gptProbe.fd)
-            }
+        if let observation, result.attachments.isEmpty,
+           let receipt = Self.gptReadReceipt(observation, path: path, resultContent: result.content) {
+            message.gptEvidence = GPTEvidenceSettlement(receipts: [receipt])
         }
         return message
     }

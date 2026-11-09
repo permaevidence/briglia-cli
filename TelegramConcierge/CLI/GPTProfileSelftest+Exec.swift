@@ -68,9 +68,10 @@ extension GPTProfileSelftest {
         ToolExecutor.gptPatchWorkerHookForTesting = { await gate.wait() }
         let patch = "*** Begin Patch\n*** Update File: \(cancelDir)/a.txt\n@@\n-old\n+new\n*** End Patch"
         let callID = "call_cancel_\(UUID().uuidString.prefix(6))"
+        let scope = await executor.gptSettlementScope
         let task = Task { await exec(executor, call("apply_patch", ["input": patch], editing: .gptJSON, id: callID)) }
         try? await Task.sleep(nanoseconds: 200_000_000)
-        let committing = GPTPatchSettlement.shared.isCommitting(callID)
+        let committing = GPTPatchSettlement.shared.isCommitting(scope: scope, callID: callID)
         task.cancel()
         try? await Task.sleep(nanoseconds: 100_000_000)
         await gate.open()
@@ -78,14 +79,14 @@ extension GPTProfileSelftest {
         ToolExecutor.gptPatchWorkerHookForTesting = nil
         t.check("D /stop during a commit: the patch completes and keeps its real outcome (P42)",
                 committing && t.read(cancelDir + "/a.txt") == "new\n" && r8.editOutcome?.status == .applied
-                && GPTPatchSettlement.shared.outcome(callID)?.status == .applied, "committing \(committing) \(r8.content)")
+                && GPTPatchSettlement.shared.outcome(scope: scope, callID: callID)?.status == .applied, "committing \(committing) \(r8.content)")
         t.check("D the settled outcome reads as one sentence", GPTPatchSettlement.describe(.init(status: .applied, changed: ["/a"])) == "the file edit was applied to 1 file")
         // Cancellation before the end of preflight: nothing changes (P24).
         let pre = t.dir("precancel")
         t.write(pre + "/a.txt", "old\n")
         let preTask = Task { () -> CodexPatch.EditOutcome in
             withUnsafeCurrentTask { $0?.cancel() }
-            return await ToolExecutor.runGPTPatchSettled(request: .init(input: "*** Begin Patch\n*** Update File: \(pre)/a.txt\n@@\n-old\n+new\n*** End Patch"), callID: "pre-\(UUID())").outcome
+            return await ToolExecutor.runGPTPatchSettled(request: .init(input: "*** Begin Patch\n*** Update File: \(pre)/a.txt\n@@\n-old\n+new\n*** End Patch"), scope: "test", callID: "pre-\(UUID())").outcome
         }
         let preOutcome = await preTask.value
         t.check("D cancelled before the first mutation: nothing changed (P24)", preOutcome.category == .cancelled && t.read(pre + "/a.txt") == "old\n", "\(preOutcome)")
@@ -176,11 +177,11 @@ extension GPTProfileSelftest {
         let rv = await exec(executor, call("bash", ["command": "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: \(proj)/v.txt\n+x\n*** End Patch\nEOF"], editing: .gptJSON))
         t.check("I verification is injected once for an intercepted success",
                 rv.content.components(separatedBy: ProjectInstructionsTracker.verificationMarkerPrefix).count == 2, rv.content)
-        let notIntercepted = call("bash", ["command": "apply_patch --version"], editing: .gptJSON)
+        let notIntercepted = call("bash", ["command": "PATH=/usr/bin:/bin apply_patch --version"], editing: .gptJSON)
         let r127 = await exec(executor, notIntercepted)
         t.check("I a non-matching apply_patch command runs normally and gets the 127 note",
                 r127.content.contains(GPTShellIntercept.notAShellCommandNote) && r127.editOutcome == nil, r127.content)
-        let standardRun = await exec(executor, call("bash", ["command": "apply_patch --version"], editing: .standard))
+        let standardRun = await exec(executor, call("bash", ["command": "PATH=/usr/bin:/bin apply_patch --version"], editing: .standard))
         t.check("I a standard bash call gets no GPT note", !standardRun.content.contains(GPTShellIntercept.notAShellCommandNote))
     }
 
@@ -216,28 +217,45 @@ extension GPTProfileSelftest {
         t.write(d + "/empty.txt", "")
         let emptyRead = await exec(executor, call("read_file", ["path": d + "/empty.txt"], editing: .gptJSON))
         t.check("K empty file read whole earns a record", emptyRead.gptEvidence?.receipts.count == 1)
-        // R3-1 / §21 note 1: in-place change, replacement and alias retarget
-        // between the probe and the receipt earn nothing (P51).
+        // R3-1 / §21 note 1 / Codex S2 R1: the bytes and their identity come
+        // from one descriptor; in-place change, replacement and an alias
+        // retargeted away and back all earn nothing (P51).
         t.write(d + "/h.txt", "a\n")
         let ok = "{\"success\":true,\"returned_lines\":1}"
-        if let probe = ToolExecutor.gptReadProbe(path: d + "/h.txt") {
-            usleep(20_000)
-            if let fh = FileHandle(forWritingAtPath: d + "/h.txt") { fh.seekToEndOfFile(); fh.write(Data("b\n".utf8)); fh.closeFile() }
-            t.check("K in-place write after the probe earns nothing (P51)", ToolExecutor.gptReadReceipt(probe, path: d + "/h.txt", resultContent: ok) == nil)
-        } else { t.check("K probe", false) }
-        if let probe = ToolExecutor.gptReadProbe(path: d + "/h.txt") {
+        GPTReadObservation.afterOpenHookForTesting = { path in
+            if let fh = FileHandle(forWritingAtPath: path) { usleep(20_000); fh.seekToEndOfFile(); fh.write(Data("b\n".utf8)); fh.closeFile() }
+        }
+        let inPlace = await exec(executor, call("read_file", ["path": d + "/h.txt"], editing: .gptJSON))
+        GPTReadObservation.afterOpenHookForTesting = nil
+        t.check("K an in-place write between open and read earns nothing (P51)", inPlace.gptEvidence == nil, inPlace.content)
+        do {
+            let o = GPTReadObservation(path: d + "/h.txt")
+            _ = try? o.readAll(d + "/h.txt")
             t.write(d + "/h.new", "c\n"); rename(d + "/h.new", d + "/h.txt")
-            t.check("K replacement after the probe earns nothing", ToolExecutor.gptReadReceipt(probe, path: d + "/h.txt", resultContent: ok) == nil)
-        } else { t.check("K probe 2", false) }
-        t.write(d + "/t1.txt", "1\n"); t.write(d + "/t2.txt", "2\n")
-        symlink(d + "/t1.txt", d + "/link.txt")
-        if let probe = ToolExecutor.gptReadProbe(path: d + "/link.txt") {
-            unlink(d + "/link.txt"); symlink(d + "/t2.txt", d + "/link.txt")
-            t.check("K alias retarget after the probe earns nothing", ToolExecutor.gptReadReceipt(probe, path: d + "/link.txt", resultContent: ok) == nil)
-        } else { t.check("K probe 3", false) }
-        if let probe = ToolExecutor.gptReadProbe(path: d + "/t1.txt") {
-            t.check("K an unchanged read earns a receipt", ToolExecutor.gptReadReceipt(probe, path: d + "/t1.txt", resultContent: ok) != nil)
-        } else { t.check("K probe 4", false) }
+            t.check("K replacement after the read earns nothing", ToolExecutor.gptReadReceipt(o, path: d + "/h.txt", resultContent: ok) == nil)
+        }
+        t.write(d + "/A.txt", "UNSEEN A\n"); t.write(d + "/B.txt", "OBSERVED B\n")
+        symlink(d + "/A.txt", d + "/alias.txt")
+        do {
+            let o = GPTReadObservation(path: d + "/alias.txt")
+            unlink(d + "/alias.txt"); symlink(d + "/B.txt", d + "/alias.txt")
+            let bytes = (try? o.readAll(d + "/alias.txt")).map { String(decoding: $0, as: UTF8.self) }
+            unlink(d + "/alias.txt"); symlink(d + "/A.txt", d + "/alias.txt")
+            let receipt = ToolExecutor.gptReadReceipt(o, path: d + "/alias.txt", resultContent: ok)
+            t.check("K alias retargeted away and back: B's bytes never credit unread A (Codex S2 R1)",
+                    bytes == "OBSERVED B\n" && receipt == nil, "\(String(describing: bytes)) \(String(describing: receipt))")
+            if let receipt { await GPTEvidenceSettlement(receipts: [receipt]).publish() }
+            let delA = await exec(executor, call("apply_patch", ["input": "*** Begin Patch\n*** Delete File: \(d)/A.txt\n*** End Patch"], editing: .gptJSON))
+            t.check("K …and unread A cannot be deleted", delA.editOutcome?.category == .knowledge && t.exists(d + "/A.txt"), delA.content)
+        }
+        do {
+            t.write(d + "/t1.txt", "1\n")
+            let o = GPTReadObservation(path: d + "/t1.txt")
+            _ = try? o.readAll(d + "/t1.txt")
+            t.check("K an unchanged read earns a receipt", ToolExecutor.gptReadReceipt(o, path: d + "/t1.txt", resultContent: ok) != nil)
+            let unread = GPTReadObservation(path: d + "/t1.txt")
+            t.check("K an observation that never read earns nothing", ToolExecutor.gptReadReceipt(unread, path: d + "/t1.txt", resultContent: ok) == nil)
+        }
         // A published receipt whose path changed since is not published (§21 note 3).
         t.write(d + "/p.txt", "p\n")
         let pr = await exec(executor, call("read_file", ["path": d + "/p.txt"], editing: .gptJSON))

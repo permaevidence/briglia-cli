@@ -26,33 +26,141 @@ struct GPTEvidenceSettlement {
 
     /// Publishes the evidence of every result in `results` (the round just
     /// committed to a run's history).
+    /// Publishes nothing once the owning task is cancelled (Codex S2 R2:
+    /// a cancelled round earns no evidence, even after its last check).
     static func publish(_ results: [ToolResultMessage]) async {
-        for result in results { if let evidence = result.gptEvidence { await evidence.publish() } }
+        for result in results {
+            guard !Task.isCancelled else { return }
+            if let evidence = result.gptEvidence { await evidence.publish() }
+        }
     }
 }
 
-/// `/stop` settlement for a GPT patch (§12.2): once the first mutation can
-/// happen, the transaction runs to commit or rollback in a worker that
-/// cancellation does not reach; the run awaits it, and the outcome is kept
-/// here (by call id) so a cancelled run records the real result.
+/// `/stop` settlement for a GPT patch (§12.2, Codex S2 R2/R4): once the
+/// first mutation can happen, the transaction runs to commit or rollback in
+/// a worker cancellation does not reach. Its real result is kept here, keyed
+/// by the owning run or lane (`scope`) and the call id, until the owner's
+/// history and notices have consumed it; a cancelled owner joins the worker
+/// and records that result instead of a synthetic one.
 final class GPTPatchSettlement: @unchecked Sendable {
     static let shared = GPTPatchSettlement()
-    private let lock = NSLock()
-    private var running: [String: Date] = [:]
-    private var settled: [String: CodexPatch.EditOutcome] = [:]
 
-    func begin(_ callID: String) { lock.lock(); running[callID] = Date(); lock.unlock() }
-    func finish(_ callID: String, _ outcome: CodexPatch.EditOutcome) {
-        lock.lock(); running.removeValue(forKey: callID); settled[callID] = outcome
-        if settled.count > 256 { settled.removeAll() }
+    struct Settled: Equatable {
+        let text: String
+        let outcome: CodexPatch.EditOutcome
+    }
+
+    /// Completed scopes kept for late consumers (a stopped run's completion
+    /// notice); entries of a scope with a running call are never dropped.
+    static let retainedScopes = 16
+
+    private let lock = NSLock()
+    private var running: [String: Set<String>] = [:]
+    private var settled: [String: [String: Settled]] = [:]
+    private var scopeOrder: [String] = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    private static func key(_ scope: String, _ callID: String) -> String { scope + "\u{1}" + callID }
+
+    func begin(scope: String, callID: String) {
+        lock.lock()
+        running[scope, default: []].insert(callID)
+        settled[scope]?.removeValue(forKey: callID)
+        touch(scope)
         lock.unlock()
     }
-    /// A GPT patch commit is in progress (the `/stop` "still finishing" note).
+
+    func finish(scope: String, callID: String, _ result: Settled) {
+        lock.lock()
+        running[scope]?.remove(callID)
+        if running[scope]?.isEmpty == true { running.removeValue(forKey: scope) }
+        settled[scope, default: [:]][callID] = result
+        touch(scope)
+        evict()
+        let resume = waiters.removeValue(forKey: Self.key(scope, callID)) ?? []
+        lock.unlock()
+        resume.forEach { $0.resume() }
+    }
+
+    private func touch(_ scope: String) {
+        scopeOrder.removeAll { $0 == scope }
+        scopeOrder.append(scope)
+    }
+
+    private func evict() {
+        while scopeOrder.count > Self.retainedScopes,
+              let index = scopeOrder.firstIndex(where: { running[$0] == nil }), index < scopeOrder.count - 1 {
+            let old = scopeOrder.remove(at: index)
+            settled.removeValue(forKey: old)
+        }
+    }
+
+    /// The owner is done with its scope (history recorded, notices built).
+    func retire(scope: String) {
+        lock.lock()
+        settled.removeValue(forKey: scope)
+        if running[scope] == nil { scopeOrder.removeAll { $0 == scope } }
+        lock.unlock()
+    }
+
+    func isCommitting(scope: String, callID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }; return running[scope]?.contains(callID) == true
+    }
     var isCommitting: Bool { lock.lock(); defer { lock.unlock() }; return !running.isEmpty }
-    func isCommitting(_ callID: String) -> Bool { lock.lock(); defer { lock.unlock() }; return running[callID] != nil }
-    func outcome(_ callID: String) -> CodexPatch.EditOutcome? { lock.lock(); defer { lock.unlock() }; return settled[callID] }
-    func takeOutcome(_ callID: String) -> CodexPatch.EditOutcome? {
-        lock.lock(); defer { lock.unlock() }; return settled.removeValue(forKey: callID)
+    func outcome(scope: String, callID: String) -> CodexPatch.EditOutcome? {
+        lock.lock(); defer { lock.unlock() }; return settled[scope]?[callID]?.outcome
+    }
+    func result(scope: String, callID: String) -> Settled? {
+        lock.lock(); defer { lock.unlock() }; return settled[scope]?[callID]
+    }
+
+    /// Waits (cancellation does not interrupt it) until none of `callIDs` is
+    /// still committing in `scope`, then returns the settled results.
+    func settle(scope: String, callIDs: [String]) async -> [String: Settled] {
+        for id in callIDs {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if running[scope]?.contains(id) == true {
+                    waiters[Self.key(scope, id), default: []].append(c)
+                    lock.unlock()
+                } else {
+                    lock.unlock()
+                    c.resume()
+                }
+            }
+        }
+        lock.lock(); defer { lock.unlock() }
+        var out: [String: Settled] = [:]
+        for id in callIDs { if let r = settled[scope]?[id] { out[id] = r } }
+        return out
+    }
+
+    /// Calls that run the GPT engine (direct, or an intercepted heredoc).
+    static func isGPTPatchCall(_ call: ToolCall) -> Bool {
+        (call.function.name == "apply_patch" && call.editing?.isGPT == true) || GPTShellIntercept.effectiveCall(call) != nil
+    }
+
+    /// The round to record for a batch interrupted by cancellation, a
+    /// timeout or an error, or nil when it ran no GPT patch: each settled
+    /// patch keeps its real result (no evidence: an interrupted batch earns
+    /// none), every other call the typed "outcome unknown" placeholder.
+    static func interruptedRound(_ assistant: AssistantToolCallMessage, settled: [String: Settled],
+                                 placeholder: String) -> ToolInteraction? {
+        guard !settled.isEmpty else { return nil }
+        let at = HarnessClock.now()
+        let results = assistant.toolCalls.map { call -> ToolResultMessage in
+            if let s = settled[call.id] {
+                var r = ToolResultMessage(toolCallId: call.id, content: MarkerNeutralizer.escape(s.text))
+                r.editOutcome = s.outcome
+                r.completedAt = at
+                return r
+            }
+            var p = ToolResultMessage(toolCallId: call.id, content: placeholder)
+            p.outcomeBinding = OutcomeBinding(kind: .interruptedIntent)
+            p.completedAt = at
+            return p
+        }
+        return ToolInteraction(assistantMessage: assistant, results: results)
     }
 
     /// One plain sentence for a `/stop` reply or completion notice.
@@ -66,6 +174,8 @@ final class GPTPatchSettlement: @unchecked Sendable {
             return "the file edit failed and could not restore \(paths)"
         }
     }
+
+    static func mainScope(_ runId: UUID) -> String { "main:" + runId.uuidString }
 }
 
 extension ToolResultMessage {
@@ -106,7 +216,7 @@ extension ToolExecutor {
         let form = call.editing?.form?.rawValue ?? "json"
         let token = StageMarkers.enter("fs.apply_patch", detail: "gpt \(form)")
         let request = CodexPatch.Request(input: input, lastWorkdir: gptLastWorkdir)
-        let applied = await Self.runGPTPatchSettled(request: request, callID: call.id)
+        let applied = await Self.runGPTPatchSettled(request: request, scope: gptSettlementScope, callID: call.id)
         var result = ToolResultMessage(toolCallId: call.id, content: applied.text)
         result.editOutcome = applied.outcome
         result.gptEvidence = applied.evidence
@@ -128,12 +238,12 @@ extension ToolExecutor {
     /// would inherit cancellation) that the caller awaits; ledger, stats and
     /// LSP side effects record the actual outcome inside the same worker, so
     /// a committed patch is never relabelled after a `/stop`.
-    static func runGPTPatchSettled(request: CodexPatch.Request, callID: String) async -> GPTPatchApplied {
+    static func runGPTPatchSettled(request: CodexPatch.Request, scope: String, callID: String) async -> GPTPatchApplied {
         let flag = GPTCancelFlag()
         var req = request
         req.isCancelled = { flag.isSet }
         let engineRequest = req
-        GPTPatchSettlement.shared.begin(callID)
+        GPTPatchSettlement.shared.begin(scope: scope, callID: callID)
         // The handler is installed before the worker exists, so a caller
         // already cancelled sets the flag before preflight can finish.
         return await withTaskCancellationHandler {
@@ -141,7 +251,7 @@ extension ToolExecutor {
                 let result = await CodexPatch.apply(engineRequest)
                 if let hook = gptPatchWorkerHookForTesting { await hook() }
                 let applied = await recordGPTPatchSideEffects(result, diagnostics: !flag.isSet)
-                GPTPatchSettlement.shared.finish(callID, applied.outcome)
+                GPTPatchSettlement.shared.finish(scope: scope, callID: callID, .init(text: applied.text, outcome: applied.outcome))
                 return applied
             }
             return await worker.value
@@ -198,40 +308,63 @@ extension ToolExecutor {
         return lines.isEmpty ? nil : (["Diagnostics:"] + lines).joined(separator: "\n")
     }
 
-    // MARK: read_file receipt (§7 R3-1, §21 note 1)
+    // MARK: read_file receipt (§7 R3-1, §21 note 1, Codex S2 R1)
 
-    /// The descriptor-bound identity of the file a GPT `read_file` is about
-    /// to read, captured BEFORE the bytes are read.
-    struct GPTReadProbe {
-        let fd: Int32
-        let key: String
-        let identity: FileIdentity
-    }
-
-    static func gptReadProbe(path rawPath: String) -> GPTReadProbe? {
+    /// The receipt for a completed GPT `read_file`, or nil. The text bytes
+    /// came from the observation's own descriptor; its identity before and
+    /// after the read must agree, the path must resolve to the same key
+    /// before the open and after the read, that key's current identity must
+    /// be the descriptor's, and the result must have delivered ≥ 1 line.
+    static func gptReadReceipt(_ observation: GPTReadObservation, path rawPath: String, resultContent: String) -> GPTEvidence.Receipt? {
+        guard let observed = observation.observed, observed.before.sameState(as: observed.after) else { return nil }
         let path = FilesystemTools.normalizePath(rawPath)
-        guard path.hasPrefix("/") else { return nil }
-        let key = CodexPatch.evidenceKey(path)
-        let fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
-        guard fd >= 0 else { return nil }
-        guard let identity = try? FileIdentity.fstatFD(fd), identity.kind == .regular else { close(fd); return nil }
-        return GPTReadProbe(fd: fd, key: key, identity: identity)
-    }
-
-    /// The receipt for a completed GPT `read_file`, or nil: the descriptor
-    /// identity must be unchanged, the path must still resolve to the same
-    /// file, and the result must have delivered at least one line.
-    static func gptReadReceipt(_ probe: GPTReadProbe, path rawPath: String, resultContent: String) -> GPTEvidence.Receipt? {
-        defer { close(probe.fd) }
-        guard let after = try? FileIdentity.fstatFD(probe.fd), after.sameState(as: probe.identity) else { return nil }
-        let path = FilesystemTools.normalizePath(rawPath)
-        guard CodexPatch.evidenceKey(path) == probe.key,
-              let current = (try? FileIdentity.lstatPath(probe.key)) ?? nil, current.sameState(as: probe.identity) else { return nil }
+        guard CodexPatch.evidenceKey(path) == observation.keyBefore,
+              let current = (try? FileIdentity.lstatPath(observation.keyBefore)) ?? nil,
+              current.sameState(as: observed.before) else { return nil }
         guard let data = resultContent.data(using: .utf8),
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               object["success"] as? Bool == true,
               let returned = object["returned_lines"] as? Int, returned >= 1 else { return nil }
-        return GPTEvidence.Receipt(key: probe.key, identity: probe.identity, source: .gptReadFile)
+        return GPTEvidence.Receipt(key: observation.keyBefore, identity: observed.before, source: .gptReadFile)
+    }
+}
+
+/// One GPT `read_file` observation (§7, Codex S2 R1): the requested path's
+/// resolution captured before the open; the bytes the result is built from
+/// read through one descriptor, with that descriptor's identity taken before
+/// and after the read. Images and PDFs never use it (no GPT record in v1).
+final class GPTReadObservation: @unchecked Sendable {
+    struct Observed { let before: FileIdentity; let after: FileIdentity }
+    let keyBefore: String
+    private let lock = NSLock()
+    private var _observed: Observed?
+    var observed: Observed? { lock.lock(); defer { lock.unlock() }; return _observed }
+    /// Test seam: runs between the open and the read.
+    nonisolated(unsafe) static var afterOpenHookForTesting: ((String) -> Void)?
+
+    init(path rawPath: String) {
+        keyBefore = CodexPatch.evidenceKey(FilesystemTools.normalizePath(rawPath))
+    }
+
+    /// The file's bytes, from one descriptor (what `Data(contentsOf:)`
+    /// returned before; errors are thrown the same way to the caller).
+    func readAll(_ path: String) throws -> Data {
+        let fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: path]) }
+        defer { close(fd) }
+        let before = try FileIdentity.fstatFD(fd)
+        Self.afterOpenHookForTesting?(path)
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = read(fd, &buffer, buffer.count)
+            if n < 0 { if errno == EINTR { continue }; throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: path]) }
+            if n == 0 { break }
+            data.append(contentsOf: buffer[0..<n])
+        }
+        let after = try FileIdentity.fstatFD(fd)
+        lock.lock(); _observed = Observed(before: before, after: after); lock.unlock()
+        return data
     }
 }
 

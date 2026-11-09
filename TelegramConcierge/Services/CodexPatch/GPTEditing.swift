@@ -263,8 +263,22 @@ final class EditingRun: @unchecked Sendable {
         return runContext
     }
 
-    /// A context passed explicitly for this run (Responses snapshots,
-    /// summaries) gets the run's configuration stamped on it.
+    /// An explicit context for a request of this run (the run's Responses
+    /// snapshot, an operation-scoped copy, a summary selection). Codex S2 R3:
+    /// its presence never establishes ownership — the same compatibility
+    /// check as `admit` applies; a cross-profile context is replaced by the
+    /// run's own producing context. The run context is not updated.
+    func admitExplicit(_ context: ProviderExecutionContext) -> ProviderExecutionContext {
+        lock.lock(); defer { lock.unlock() }
+        let candidate = EditingConfig.resolve(context, switchOn: switchOn,
+                                              rejected: { [transitioned, currentRouteKey] in transitioned && $0 == currentRouteKey })
+        guard candidate == current else { return runContext }
+        var ctx = context
+        ctx.editing = current
+        return ctx
+    }
+
+    /// The run's configuration stamped on a context already admitted.
     func stamped(_ context: ProviderExecutionContext) -> ProviderExecutionContext {
         var ctx = context
         ctx.editing = config

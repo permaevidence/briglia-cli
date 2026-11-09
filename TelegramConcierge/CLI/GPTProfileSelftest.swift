@@ -364,6 +364,38 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         t.check("L after the transition the run is JSON and stays JSON", freeRun.config == .gptJSON && freeRun.stamped(freeformCtx).editing == .gptJSON
                 && freeRun.admit(fresh: freeformCtx).editing == .gptJSON)
         t.check("L a JSON run never transitions", !run.transitionToJSON() && run.config == .gptJSON)
+        // Codex S2 R3: an explicit context never bypasses the compatibility check.
+        let claude = chat("anthropic/claude-sonnet-4")
+        t.check("L an explicit cross-profile context is replaced by the run's own (Codex S2 R3)",
+                run.admitExplicit(claude).model == "openai/gpt-6-luna" && run.admitExplicit(claude).editing == .gptJSON)
+        t.check("L an explicit compatible context is used and stamped",
+                run.admitExplicit(gptChat).model == "openai/gpt-6-luna" && run.admitExplicit(gptChat).editing == .gptJSON)
+        let toResponses = responses("deepseek/deepseek-v4.1-flash", base: "https://openrouter.ai/api/v1")
+        t.check("L a Chat-to-Responses change to a non-GPT model keeps the run's chat context",
+                run.admit(fresh: toResponses).model == "openai/gpt-6-luna" && run.admit(fresh: toResponses).wireProtocol == .chatCompletions)
+        t.check("L standard run: an explicit GPT context is replaced by the run's own",
+                !GPTModelMatcher.isGPT(standardRun.admitExplicit(gptChat).model) && standardRun.admitExplicit(gptChat).editing == .standard)
+        // Codex S2 R4: the settlement registry is scoped and retains outcomes.
+        let reg = GPTPatchSettlement()
+        let applied = GPTPatchSettlement.Settled(text: "Success.", outcome: .init(status: .applied, changed: ["/old"]))
+        reg.begin(scope: "run-A", callID: "reused"); reg.finish(scope: "run-A", callID: "reused", applied)
+        reg.begin(scope: "run-A", callID: "reused")
+        t.check("L a reused call id: the new call is running and the old outcome is gone (R4)",
+                reg.isCommitting(scope: "run-A", callID: "reused") && reg.outcome(scope: "run-A", callID: "reused") == nil)
+        reg.finish(scope: "run-A", callID: "reused", applied)
+        reg.begin(scope: "run-B", callID: "reused")
+        t.check("L the same call id in another scope never collides (R4)",
+                reg.outcome(scope: "run-A", callID: "reused") == applied.outcome && reg.isCommitting(scope: "run-B", callID: "reused")
+                && !reg.isCommitting(scope: "run-A", callID: "reused"))
+        for i in 0..<300 { reg.begin(scope: "run-C", callID: "c\(i)"); reg.finish(scope: "run-C", callID: "c\(i)", applied) }
+        t.check("L hundreds of outcomes in one scope never drop another scope's (R4)",
+                reg.outcome(scope: "run-A", callID: "reused") == applied.outcome && reg.outcome(scope: "run-C", callID: "c299") == applied.outcome)
+        for i in 0..<(GPTPatchSettlement.retainedScopes + 4) { reg.begin(scope: "old-\(i)", callID: "x"); reg.finish(scope: "old-\(i)", callID: "x", applied) }
+        t.check("L completed scopes beyond the bound are retired oldest first; a running scope is kept (R4)",
+                reg.outcome(scope: "run-A", callID: "reused") == nil && reg.isCommitting(scope: "run-B", callID: "reused")
+                && reg.outcome(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)", callID: "x") != nil)
+        reg.retire(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)")
+        t.check("L retire drops a consumed scope", reg.outcome(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)", callID: "x") == nil)
         t.check("L the stamp copies the producing context's editing",
                 {
                     let response = LLMResponse.toolCalls(assistantMessage: AssistantToolCallMessage(content: "", toolCalls: []),

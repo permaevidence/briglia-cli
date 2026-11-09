@@ -180,16 +180,22 @@ extension GPTProfileSelftest {
         func classify(_ b: String, status: Int = 400, request: Data? = requestWithCustom) -> Bool {
             GPTCustomToolRejection.classify(status: status, rawBody: Data(b.utf8), requestBody: request, underlying: underlying) != nil
         }
-        t.check("X classifies tools[k] with a refusal code", classify(errorBody(param: "tools[1]", code: "invalid_value")))
-        t.check("X classifies a sub-path tools[k].format", classify(errorBody(param: "tools[1].format", code: "unsupported_value")))
+        t.check("X classifies tools[k].format with a refusal code", classify(errorBody(param: "tools[1].format", code: "invalid_value")))
+        t.check("X classifies tools[k].type", classify(errorBody(param: "tools[1].type", code: "unsupported_value")))
+        t.check("X classifies a format sub-path", classify(errorBody(param: "tools[1].format.syntax", code: "invalid_value")))
         t.check("X classifies OpenRouter's wrapped upstream error", classify(errorBody(param: "tools[1].format.definition", code: "invalid_value", wrapped: true)))
+        t.check("X classifies the whole entry only with a type-specific code", classify(errorBody(param: "tools[1]", code: "unsupported_tool_type")))
+        t.check("X does not classify the whole entry with a generic code (Codex S2 R5)", !classify(errorBody(param: "tools[1]", code: "invalid_value")))
+        t.check("X does not classify the entry's description (Codex S2 R5)", !classify(errorBody(param: "tools[1].description", code: "invalid_value")))
+        t.check("X does not classify the entry's name", !classify(errorBody(param: "tools[1].name", code: "invalid_value")))
+        t.check("X does not classify an unrelated field of the entry", !classify(errorBody(param: "tools[1].unrelated", code: "unknown_parameter")))
         t.check("X does not classify a generic `tools` error (P41)", !classify(errorBody(param: "tools", code: "invalid_value")))
-        t.check("X does not classify another tool's error", !classify(errorBody(param: "tools[0]", code: "invalid_value")))
-        t.check("X does not classify tools[10] for k = 1", !classify(errorBody(param: "tools[10]", code: "invalid_value")))
-        t.check("X does not classify an unknown code", !classify(errorBody(param: "tools[1]", code: "rate_limit_exceeded")))
+        t.check("X does not classify another tool's error", !classify(errorBody(param: "tools[0].type", code: "invalid_value")))
+        t.check("X does not classify tools[10] for k = 1", !classify(errorBody(param: "tools[10].format", code: "invalid_value")))
+        t.check("X does not classify an unknown code", !classify(errorBody(param: "tools[1].format", code: "rate_limit_exceeded")))
         t.check("X does not classify an input/history error", !classify(errorBody(param: "input[3]", code: "invalid_value")))
-        t.check("X does not classify without a custom entry in the request", !classify(errorBody(param: "tools[1]", code: "invalid_value"), request: requestWithout))
-        t.check("X does not classify a non-400", !classify(errorBody(param: "tools[1]", code: "invalid_value"), status: 422))
+        t.check("X does not classify without a custom entry in the request", !classify(errorBody(param: "tools[1].format", code: "invalid_value"), request: requestWithout))
+        t.check("X does not classify a non-400", !classify(errorBody(param: "tools[1].format", code: "invalid_value"), status: 422))
         // End to end through the loopback route.
         GPTPatchFormStore.fileURLOverrideForTesting = URL(fileURLWithPath: t.dir("xform")).appendingPathComponent("f.json")
         GPTPatchFormStore.shared.resetCacheForTesting()
@@ -231,7 +237,7 @@ extension GPTProfileSelftest {
         let notices2 = NoticeBox()
         let run3 = EditingRun.start(ctx)
         run3.setNotifier { await notices2.add($0) }
-        server.script([errorBody(param: "tools[\(k)]", code: "unsupported_value"), errorBody(param: "input", code: "invalid_value")], statuses: [400, 400])
+        server.script([errorBody(param: "tools[\(k)].type", code: "unsupported_value"), errorBody(param: "input", code: "invalid_value")], statuses: [400, 400])
         var failed = false
         do { _ = try await request(service, ctx, run: run3, messages: [Message(role: .user, content: "x")], tools: gptTools, root: root) }
         catch { failed = true }

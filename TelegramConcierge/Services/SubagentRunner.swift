@@ -695,6 +695,11 @@ actor SubagentRunner {
         // its own resolved context (the Web researcher has no file tools and
         // stays standard); a GPT child gets the GPT inventory.
         let editingRun: EditingRun? = subagentType.isWebResearcher ? nil : EditingRun.start(runExecution ?? snapshot)
+        // §12.2 (Codex S2 R2/R4): this run's GPT patch results, under its own
+        // scope, joined and recorded if a batch is cut short.
+        let gptSettlementScope = "sub:" + resolvedSessionId + ":" + UUID().uuidString
+        await toolExecutor.setGPTSettlementScope(gptSettlementScope)
+        defer { GPTPatchSettlement.shared.retire(scope: gptSettlementScope) }
         if let editingRun, editingRun.config.isGPT {
             filteredTools = await buildInventory(editingRun.config)
             allowedToolNames = Set(filteredTools.map { $0.function.name })
@@ -1003,8 +1008,28 @@ actor SubagentRunner {
                     }
                     var toolResults: [ToolResultMessage] = []
                     if !executableCalls.isEmpty {
-                        let executed = try await executeWithTimeout(executableCalls, using: toolExecutor)
-                        toolResults.append(contentsOf: executed)
+                        do {
+                            let executed = try await executeWithTimeout(executableCalls, using: toolExecutor)
+                            toolResults.append(contentsOf: executed)
+                        } catch {
+                            // Cancellation, staleness or the nested ceiling can
+                            // return before a GPT patch worker settles: join it
+                            // and record its real result (no evidence).
+                            let patchIDs = executableCalls.filter(GPTPatchSettlement.isGPTPatchCall).map(\.id)
+                            if !patchIDs.isEmpty {
+                                let settled = await GPTPatchSettlement.shared.settle(scope: gptSettlementScope, callIDs: patchIDs)
+                                if let interrupted = GPTPatchSettlement.interruptedRound(assistantMessage, settled: settled,
+                                                                                         placeholder: Self.interruptedToolIntentPlaceholder) {
+                                    if responsesExecution != nil {
+                                        toolInteractions[toolInteractions.count - 1] = interrupted
+                                        _ = await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: toolInteractions)
+                                    } else {
+                                        toolInteractions.append(interrupted)
+                                    }
+                                }
+                            }
+                            throw error
+                        }
                     }
                     toolResults.append(contentsOf: blockedResults)
                     markProgress()  // Tools completed — subagent is alive
@@ -1036,8 +1061,9 @@ actor SubagentRunner {
                         }
                     } else { toolInteractions.append(completed) }
                     // GPT_APPLY_PATCH_PLAN §7: evidence is published once the
-                    // results are committed to this run's history.
-                    await GPTEvidenceSettlement.publish(ordered)
+                    // results are committed to this run's history (never after
+                    // cancellation).
+                    if !Task.isCancelled { await GPTEvidenceSettlement.publish(ordered) }
                     compactionAttempts.didExecuteWork()
 
                     // Pre-flight budget check: if the new interaction pushed the

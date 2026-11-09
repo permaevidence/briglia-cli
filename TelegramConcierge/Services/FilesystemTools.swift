@@ -44,7 +44,8 @@ actor FilesystemTools {
     /// multimodal injection. Always snapshots FileTime on success.
     /// `pages` (for PDFs only): range string like "1-5", "3", or "10-20". Required when the
     /// PDF has more than 20 pages; capped at 20 pages per call.
-    func readFile(path rawPath: String, offset: Int? = nil, limit: Int? = nil, pages: String? = nil) async -> ReadResult {
+    func readFile(path rawPath: String, offset: Int? = nil, limit: Int? = nil, pages: String? = nil,
+                  gptObservation: GPTReadObservation? = nil) async -> ReadResult {
         let path = Self.normalizePath(rawPath)
 
         guard Self.isAbsolute(path) else {
@@ -166,7 +167,10 @@ actor FilesystemTools {
         }
 
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            // GPT_APPLY_PATCH_PLAN §7 (Codex S2 R1): a GPT read takes its
+            // bytes and their identity from ONE descriptor; every other read
+            // is today's.
+            let data = try gptObservation?.readAll(path) ?? Data(contentsOf: URL(fileURLWithPath: path))
             let decodedText: String
             var decodedAsLatin1 = false
             if let utf8 = String(data: data, encoding: .utf8) {

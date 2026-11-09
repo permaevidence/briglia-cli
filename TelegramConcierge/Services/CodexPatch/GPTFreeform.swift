@@ -34,12 +34,17 @@ enum GPTFreeform {
 }
 
 /// §5.6 classifier: a provider's refusal of the freeform `apply_patch`
-/// entry itself. Produced only when ALL hold: HTTP 400; the request carried
-/// a `custom` tool entry at index k; the error's `param` is `tools[k]` or a
-/// sub-path of it; and the code is one of the refusal codes below (an
-/// unknown code does not classify). Generic `tools` errors, other tools'
-/// errors and history/namespace errors never classify. OpenRouter may wrap
-/// the upstream body in `error.metadata.raw`; both shapes are read.
+/// entry's TYPE or FORMAT itself (Codex S2 R5: conservative until a live
+/// rejection fixture exists). Produced only when ALL hold: HTTP 400; the
+/// request carried a `custom` tool entry at index k; and either
+/// - `param` is `tools[k].type` or `tools[k].format` (or a sub-path of the
+///   format), with a code from `refusalCodes`; or
+/// - `param` is the whole entry `tools[k]` with a type-specific code from
+///   `typeCodes`.
+/// Errors about the entry's name, description or any other field, generic
+/// `tools` errors, other tools' errors and history/namespace errors never
+/// classify. OpenRouter may wrap the upstream body in
+/// `error.metadata.raw`; both shapes are read.
 enum GPTCustomToolRejection {
     struct Rejected: Error, LocalizedError {
         let status: Int
@@ -52,6 +57,8 @@ enum GPTCustomToolRejection {
     /// invalid (OpenAI's invalid_request_error vocabulary).
     static let refusalCodes: Set<String> = ["invalid_value", "unsupported_value", "invalid_type",
                                             "unsupported_tool_type", "invalid_tool_type", "unsupported_parameter", "unknown_parameter"]
+    /// Codes that by themselves name the tool type as the problem.
+    static let typeCodes: Set<String> = ["unsupported_tool_type", "invalid_tool_type"]
 
     static func customIndices(_ requestBody: Data?) -> Set<Int> {
         guard let requestBody, let object = (try? JSONSerialization.jsonObject(with: requestBody)) as? [String: Any],
@@ -81,7 +88,9 @@ enum GPTCustomToolRejection {
             guard let param = error["param"] as? String, let code = error["code"] as? String, refusalCodes.contains(code) else { continue }
             for k in indices {
                 let base = "tools[\(k)]"
-                if param == base || param.hasPrefix(base + ".") || param.hasPrefix(base + "[") {
+                let typeOrFormat = param == base + ".type" || param == base + ".format"
+                    || param.hasPrefix(base + ".format.") || param.hasPrefix(base + ".format[")
+                if typeOrFormat || (param == base && typeCodes.contains(code)) {
                     return Rejected(status: status, detail: "\(code) at \(param)", underlying: underlying)
                 }
             }

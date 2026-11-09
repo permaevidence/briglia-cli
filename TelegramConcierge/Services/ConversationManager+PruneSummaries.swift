@@ -460,8 +460,13 @@ extension ConversationManager {
 
         let selected: ProviderExecutionContext
         if let execution { selected = execution }
-        else { selected = await openRouterService.executionContext(modelOverride: nil,
-            providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main) }
+        else {
+            let fresh = await openRouterService.executionContext(modelOverride: nil,
+                providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+            // §3.2 (Codex S2 R3): admitted through the turn's lease before the
+            // protocol decision below.
+            selected = mainRunEditing?.admit(fresh: fresh) ?? fresh
+        }
         let summaryExecution = selected.wireProtocol == .responses ? selected.forOperation(.pruneSummary) : nil
         defer { summaryExecution?.responsesTurn.close() }
         let summaryStart = Date()

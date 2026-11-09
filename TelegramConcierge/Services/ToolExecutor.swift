@@ -211,6 +211,10 @@ actor ToolExecutor {
     /// Last absolute `workdir` a GPT run used with bash (the apply_patch
     /// relative-path hint, GPT_APPLY_PATCH_PLAN D2).
     var gptLastWorkdir: String?
+    /// The owning run or lane of this executor's GPT patches (§12.2
+    /// settlement registry key); set by the owner at the start of each run.
+    var gptSettlementScope: String = "exec:" + UUID().uuidString
+    func setGPTSettlementScope(_ scope: String) { gptSettlementScope = scope }
     /// Admissions preflighted for the current tool round, keyed by call id.
     private var pendingWaitAdmissions: [String: BashWaitLedger.Admission] = [:]
 
@@ -472,7 +476,7 @@ actor ToolExecutor {
         } catch {
             _ = await MultiAssistantHooks.after(toolName: call.function.name, argumentsJSON: call.function.arguments,
                                                 resultContent: "{\"error\": \"cancelled\"}", pending: multi,
-                                                outcome: GPTPatchSettlement.shared.outcome(call.id))
+                                                outcome: GPTPatchSettlement.shared.outcome(scope: gptSettlementScope, callID: call.id))
             throw error
         }
         result.content += await MultiAssistantHooks.after(toolName: call.function.name, argumentsJSON: call.function.arguments,

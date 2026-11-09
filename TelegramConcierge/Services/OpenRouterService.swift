@@ -1464,7 +1464,7 @@ actor OpenRouterService {
         // subagent run) the context is today's and editing is `.standard`.
         var context: ProviderExecutionContext
         if let execution {
-            context = editingRun?.stamped(execution) ?? execution
+            context = editingRun?.admitExplicit(execution) ?? execution
         } else {
             let fresh = executionContext(
                 modelOverride: modelOverride, providerOverride: providerOverride,
