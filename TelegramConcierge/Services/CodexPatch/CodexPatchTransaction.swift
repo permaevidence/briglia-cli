@@ -334,6 +334,17 @@ enum CodexPatchTransaction {
         var conflicts: [String] = []
         /// Paths still carrying this patch's change (the undo itself failed).
         var stillChanged: [String] = []
+        /// Temporary files this transaction created that could not be removed.
+        var leftoverTemps: [String] = []
+    }
+
+    /// Removes the outstanding temps of a journal (identity-checked); a temp
+    /// that cannot be removed is reported, never silently left behind.
+    static func cleanTemps(_ journal: Journal, _ report: inout RollbackReport) {
+        for case .temp(let p, _, let ino) in journal.receipts {
+            guard let id = try? FileIdentity.lstatPath(p), id.inode == ino else { continue }
+            if unlink(p) != 0 { report.leftoverTemps.append(p) }
+        }
     }
 
     /// Reverse journal order, under the same cooperating locks; each path is
@@ -345,7 +356,9 @@ enum CodexPatchTransaction {
         for receipt in journal.receipts.reversed() {
             switch receipt {
             case .temp(let path, _, let inode):
-                if let id = try? FileIdentity.lstatPath(path), id.inode == inode { unlink(path) }
+                if let id = try? FileIdentity.lstatPath(path), id.inode == inode, unlink(path) != 0 {
+                    report.leftoverTemps.append(path)
+                }
 
             case .createdDirectory(let path, let device, let inode, let mode):
                 guard let id = try? FileIdentity.lstatPath(path), id.kind == .directory,
@@ -366,8 +379,11 @@ enum CodexPatchTransaction {
 
             case .replaced(let path, let display, let pre, let post):
                 guard let post else { report.conflicts.append(display); continue }
+                // The restoration's own temps are cleaned whatever happens,
+                // including a failed stage (Codex S1 R1).
+                let tmp = Journal()
+                defer { cleanTemps(tmp, &report) }
                 do {
-                    let tmp = Journal()
                     let staged = try stage(pre.data, forTarget: path, finalMode: pre.identity.mode, journal: tmp)
                     do {
                         try revalidateAndReplace(staged, target: path, display: display,
@@ -382,9 +398,6 @@ enum CodexPatchTransaction {
                         } else {
                             report.stillChanged.append(display)
                         }
-                    }
-                    for case .temp(let p, _, let ino) in tmp.receipts {
-                        if let id = try? FileIdentity.lstatPath(p), id.inode == ino { unlink(p) }
                     }
                 } catch {
                     report.stillChanged.append(display)
@@ -409,8 +422,11 @@ enum CodexPatchTransaction {
             case .removed(let path, let display, let pre):
                 // Restore only while the name is still absent: stage, then
                 // link (fails if the name was recreated).
+                // The restoration's own temps are cleaned whatever happens,
+                // including a failed stage (Codex S1 R1).
+                let tmp = Journal()
+                defer { cleanTemps(tmp, &report) }
                 do {
-                    let tmp = Journal()
                     let staged = try stage(pre.data, forTarget: path, finalMode: pre.identity.mode, journal: tmp)
                     do {
                         try revalidateAndReplace(staged, target: path, display: display, expected: .absent, pre: nil, journal: tmp)
@@ -423,9 +439,6 @@ enum CodexPatchTransaction {
                         } else {
                             report.stillChanged.append(display)
                         }
-                    }
-                    for case .temp(let p, _, let ino) in tmp.receipts {
-                        if let id = try? FileIdentity.lstatPath(p), id.inode == ino { unlink(p) }
                     }
                 } catch {
                     report.stillChanged.append(display)

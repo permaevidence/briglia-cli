@@ -294,6 +294,49 @@ extension CodexPatchSelftest {
         }
     }
 
+    /// Codex S1 R1: a failure while staging a RESTORATION (rollback of a
+    /// replaced file or of a removed Move source) must still clean its temp.
+    static func rollbackStageFailureTests(_ t: CPTest) async {
+        var details: [String] = []
+        var ok = 0, total = 0
+        for (kind, suffix) in [("replaced", "/upd.txt"), ("removed", "/mv.txt")] {
+            for point in [CodexPatchTransaction.FaultPoint.stageWrite, .stageChmod, .stageFsync] {
+                total += 1
+                let (d, patch) = await fourOpFixture(t, "rs")
+                CodexPatchTransaction.faultInjector = { p, path in p == .remove && path.hasSuffix("/del.txt") }
+                CodexPatchTransaction.beforeRollbackHook = {
+                    CodexPatchTransaction.faultInjector = { p, path in p == point && path.hasSuffix(suffix) }
+                }
+                let r = await t.apply(patch)
+                CodexPatchTransaction.faultInjector = nil
+                CodexPatchTransaction.beforeRollbackHook = nil
+                var leftovers: [String] = []
+                if let e = FileManager.default.enumerator(atPath: d) {
+                    for case let rel as String in e where (rel as NSString).lastPathComponent.contains(".tmp-") { leftovers.append(rel) }
+                }
+                let target = d + suffix
+                let reported = r.outcome.changed.contains(target)
+                if leftovers.isEmpty && reported && r.outcome.status == .partial { ok += 1 }
+                else { details.append("\(kind)/\(point.rawValue): leftovers \(leftovers) status \(r.outcome.status) changed \(r.outcome.changed)") }
+            }
+        }
+        t.check("T.19 a failed restoration stage (replaced and removed, write/chmod/fsync) leaves no temp and is reported (Codex S1 R1) (\(ok)/\(total))",
+                ok == total, details.joined(separator: " || "))
+        do {
+            // Codex's engine-level reproduction.
+            let d = t.dir("rs2")
+            t.write(d + "/a.txt", "old\n"); t.write(d + "/b.txt", "old\n")
+            CodexPatchTransaction.faultInjector = { p, path in p == .stageWrite && path.hasSuffix("/b.txt") }
+            CodexPatchTransaction.beforeRollbackHook = { CodexPatchTransaction.faultInjector = { p, _ in p == .stageFsync } }
+            let r = await t.apply(t.wrap("*** Update File: \(d)/a.txt\n@@\n-old\n+new\n*** Update File: \(d)/b.txt\n@@\n-old\n+new"))
+            CodexPatchTransaction.faultInjector = nil
+            CodexPatchTransaction.beforeRollbackHook = nil
+            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+            t.check("T.20 Codex's reproduction: partial outcome, a.txt reported still changed, no temp left",
+                    leftovers.isEmpty && r.outcome.status == .partial && r.outcome.changed == ["\(d)/a.txt"] && t.read(d + "/b.txt") == "old\n", "\(leftovers) \(r.text)")
+        }
+    }
+
     final class HitFlag: @unchecked Sendable {
         private(set) var value = false
         func hit() { value = true }

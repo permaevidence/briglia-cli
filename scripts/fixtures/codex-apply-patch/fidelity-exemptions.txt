@@ -1,4 +1,9 @@
 # Rust tests of the pinned Codex apply-patch sources that have no Swift
 # counterpart, one per line: <module>::<test> — <reason>.
 # scripts/codex_patch_fidelity_check.py fails on any other untagged test.
+#
+# "Ported" means tagged coverage, not full equivalence of every Rust assertion:
+# the file_update_tests ports (F.40–F.44) assert the resulting contents only;
+# the Rust tests also assert original_content and the exact unified-diff text,
+# an API outside this engine's output contract (Briglia emits no unified diff).
 parser::test_hunk_resolve_path_accepts_relative_and_absolute_paths — Briglia has no working directory (D2): relative paths are refused before any work (E.P1, F.51b) and absolute paths are used as written (F.3, F.51a)

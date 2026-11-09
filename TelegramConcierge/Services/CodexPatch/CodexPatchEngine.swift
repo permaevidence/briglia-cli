@@ -144,6 +144,10 @@ extension CodexPatch {
 
     static func resolve(_ raw: String, request: Request) throws -> ResolvedPath {
         let display = normalizePath(raw)
+        // Foundation would percent-encode a NUL into the name: refuse it.
+        if display.unicodeScalars.contains("\u{0}") {
+            throw Refusal(category: .path, text: verificationFailure("a path contains a NUL character; paths must be plain text"))
+        }
         guard display.hasPrefix("/") else {
             var hint = ""
             if let wd = request.lastWorkdir, wd.hasPrefix("/") {
@@ -431,7 +435,11 @@ extension CodexPatch {
             var outcome = EditOutcome(status: .rolledBack, changed: report.stillChanged, restored: report.restored,
                                       conflicts: report.conflicts, category: failure.kind == .conflict ? .conflict : .io)
             if !report.conflicts.isEmpty || !report.stillChanged.isEmpty { outcome.status = .partial }
-            return Result(text: transactionFailureText(reason: failure.message, outcome: outcome), outcome: outcome)
+            var text = transactionFailureText(reason: failure.message, outcome: outcome)
+            if !report.leftoverTemps.isEmpty {
+                text += "\nTemporary files that could not be removed: \(report.leftoverTemps.joined(separator: ", "))"
+            }
+            return Result(text: text, outcome: outcome)
         }
         StageMarkers.exit(token, .ok)
         return successResult(ops, journal: journal)

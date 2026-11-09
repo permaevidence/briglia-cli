@@ -192,6 +192,10 @@ extension CodexPatchSelftest {
         do {
             let r = await t.apply(t.wrap("*** Environment ID: remote\n*** Add File: /tmp/never-\(UUID().uuidString).txt\n+x"))
             t.check("E.P16 *** Environment ID parses as Codex, then is refused", r.outcome.status == .refused && r.text.contains("Environment ID is not supported"), r.text)
+            let nd = t.dir("p18")
+            let rn = await t.apply(t.wrap("*** Add File: \(nd)/nul.txt\u{0}suffix\n+x"))
+            t.check("E.P18 a path with a NUL is refused, nothing created (Codex S1 note 1)",
+                    rn.outcome.status == .refused && rn.outcome.category == .path && (try? FileManager.default.contentsOfDirectory(atPath: nd))?.isEmpty == true, rn.text)
             let r2 = await t.apply("*** Begin Patch\n*** End Patch")
             t.check("E.P17 zero hunks: 'No files were modified.' (scenario 005)", r2.text == "apply_patch verification failed: No files were modified.", r2.text)
         }
