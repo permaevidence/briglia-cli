@@ -190,6 +190,15 @@ extension GPTProfileSelftest {
         t.check("Y a streamed lark-grammar failure classifies on every route",
                 terminalFires("response.failed", ["error": ["code": "invalid_prompt", "message": "Invalid lark grammar. 1(3): x"]], chatGPT: false) == true
                 && terminalFires("response.failed", ["error": ["code": NSNull(), "message": "Invalid lark grammar. 1(3): x"]]) == true)
+        // Real Briglia requests carry ~30 tools that OpenRouter echoes in the
+        // terminal snapshot: far above 64 KiB.
+        let echoedTools: [[String: Any]] = (0..<120).map { ["type": "function", "name": "tool_\($0)", "description": String(repeating: "d", count: 1_000)] }
+        let bigFailed = jsonText(["id": "resp_big", "status": "failed", "output": [], "tools": echoedTools,
+                                  "error": ["code": "invalid_prompt", "message": "Invalid lark grammar. 1(3): x"]])
+        t.check("Y a lark refusal whose terminal echoes a large tool list (>64 KiB) still classifies",
+                bigFailed.utf8.count > 64 * 1024
+                && GPTCustomToolRejection.classifyTerminal(Data(bigFailed.utf8), requestBody: topLevel, chatGPTRoute: false,
+                                                           streamedOutput: false, underlying: underlying) != nil)
         t.check("Y a completed-but-empty answer never classifies",
                 GPTCustomToolRejection.classifyTerminal(Data(reply([]).utf8), requestBody: topLevel, chatGPTRoute: true,
                                                         streamedOutput: false, underlying: underlying) == nil)

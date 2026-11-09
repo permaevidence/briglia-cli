@@ -199,7 +199,10 @@ enum GPTCustomToolRejection {
     /// errors and completed-but-empty answers never reach this rule.
     static func classifyTerminal(_ bytes: Data, requestBody: Data?, chatGPTRoute: Bool, streamedOutput: Bool,
                                  underlying: Error) -> Error? {
-        guard !streamedOutput, bytes.count <= 64 * 1024, !customEntries(requestBody).isEmpty,
+        // One terminal record at most (the stream's own record bound): the
+        // snapshot echoes the request's whole tool list on some hosts
+        // (OpenRouter), far above an error body's 64 KiB.
+        guard !streamedOutput, bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,
               let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
               let status = object["status"] as? String else { return nil }
         if let output = object["output"] {

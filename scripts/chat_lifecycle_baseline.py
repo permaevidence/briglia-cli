@@ -222,6 +222,11 @@ REVIEWED_DEFAULTS_DELTAS = {
     "TelegramConcierge/Services/WebOrchestrator.swift:defaults": (2, 3),
     "TelegramConcierge/Services/Settings/SettingsWriter.swift:defaults": (None, 1),
     "TelegramConcierge/Services/Settings/RouteSnapshot.swift:defaults-default": (None, 1),
+    # GPT apply_patch (GPT_APPLY_PATCH_PLAN §3.5): the `/gptpatch` kill switch
+    # is read like `/prunebackground` (`briglia.gptPatchProfile`, absent = on)
+    # through Prefs.store, one read in GPTPatchSwitch.storedValue. Writes go
+    # through the settings writer (already counted). New key, no other change.
+    "TelegramConcierge/Services/CodexPatch/GPTEditing.swift:defaults": (None, 1),
 }
 
 
