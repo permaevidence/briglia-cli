@@ -86,7 +86,7 @@ struct CodexPatchSelftest: AsyncParsableCommand {
         if t.runs("E") { await engineText(t); await enginePaths(t); await engineMatching(t); await engineLimits(t) }
         if t.runs("K") { await ledgerTests(t) }
         if t.runs("S") { await secretStoreTests(t) }
-        if t.runs("T") { await transactionTests(t); await transactionRollbackTests(t); await rollbackStageFailureTests(t) }
+        if t.runs("T") { await transactionTests(t); await transactionRollbackTests(t); await rollbackStageFailureTests(t); await discardFailureTests(t) }
         if t.runs("C") { await scenarioCorpus(t) }
         if t.runs("G") { await goldenCorpus(t) }
         if t.runs("X") { await extractionTests(t) }

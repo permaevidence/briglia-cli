@@ -97,6 +97,8 @@ BREAKS = [
         "            if let linkGuard {\n                guard let now", "            if let linkGuard, false {\n                guard let now")]),
     ("P59 restoration temps not cleaned when the restore stage fails (Codex S1 R1)", "T.19", [(C + "CodexPatchTransaction.swift",
         "            if unlink(p) != 0 { report.leftoverTemps.append(p) }\n", "            _ = p\n")]),
+    ("P61 discard forgets a temp whose unlink failed (Codex S1 round 2)", "T.21", [(C + "CodexPatchTransaction.swift",
+        "            guard unlink(staged.tempPath) == 0 else { return }\n", "            unlink(staged.tempPath)\n")]),
     ("P60 a NUL in a path accepted", "E.P18", [(C + "CodexPatchEngine.swift",
         "        if display.unicodeScalars.contains(\"\\u{0}\") {", "        if false {")]),
     ("P57 canonical equivalence used for matching", "E.T12", [(C + "CodexPatchParser.swift",

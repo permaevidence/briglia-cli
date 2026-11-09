@@ -442,7 +442,15 @@ extension CodexPatch {
             return Result(text: text, outcome: outcome)
         }
         StageMarkers.exit(token, .ok)
-        return successResult(ops, journal: journal)
+        var result = successResult(ops, journal: journal)
+        // Any temp a step could not remove (its receipt survived) is cleaned
+        // now, or named.
+        var leftover = CodexPatchTransaction.RollbackReport()
+        CodexPatchTransaction.cleanTemps(journal, &leftover)
+        if !leftover.leftoverTemps.isEmpty {
+            result.text += "\nnote: temporary files that could not be removed: \(leftover.leftoverTemps.joined(separator: ", "))"
+        }
+        return result
     }
 
     static func write(_ w: PlannedWrite, journal: CodexPatchTransaction.Journal) throws {

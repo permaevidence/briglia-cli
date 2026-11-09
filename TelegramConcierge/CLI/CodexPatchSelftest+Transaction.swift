@@ -270,8 +270,9 @@ extension CodexPatchSelftest {
             let r = await t.apply(t.wrap("*** Update File: \(dataDir)/a.md\n@@\n-a\n+b\n*** Delete File: \(dataDir)/z.md"))
             CodexPatchTransaction.faultInjector = nil
             CodexPatchTransaction.beforeRollbackHook = nil
+            let canon = { (p: String) in URL(fileURLWithPath: p).resolvingSymlinksInPath().path }
             t.check("T.16 a tightened directory whose mode changed again is a conflict (R3-2)",
-                    r.outcome.conflicts.contains(dataDir) && t.mode(dataDir) == 0o750, r.text)
+                    r.outcome.conflicts.contains { canon($0) == canon(dataDir) } && t.mode(dataDir) == 0o750, r.text)
         }
         do {
             // Temps registered before a failing write are cleaned.
@@ -335,6 +336,30 @@ extension CodexPatchSelftest {
             t.check("T.20 Codex's reproduction: partial outcome, a.txt reported still changed, no temp left",
                     leftovers.isEmpty && r.outcome.status == .partial && r.outcome.changed == ["\(d)/a.txt"] && t.read(d + "/b.txt") == "old\n", "\(leftovers) \(r.text)")
         }
+    }
+
+    /// Codex S1 round 2: the restoration's rename AND the temp's unlink fail
+    /// under real permissions (parent made read-only after staging); the temp
+    /// must stay accounted for and be named.
+    static func discardFailureTests(_ t: CPTest) async {
+        let d = t.dir("rs3")
+        t.write(d + "/a.txt", "old\n"); t.write(d + "/b.txt", "old\n")
+        CodexPatchTransaction.faultInjector = { p, path in p == .stageWrite && path.hasSuffix("/b.txt") }
+        CodexPatchTransaction.beforeRollbackHook = {
+            CodexPatchTransaction.faultInjector = nil
+            CodexPatchTransaction.beforeRevalidateHook = { _ in chmod(d, 0o500) }
+        }
+        let r = await t.apply(t.wrap("*** Update File: \(d)/a.txt\n@@\n-old\n+new\n*** Update File: \(d)/b.txt\n@@\n-old\n+new"))
+        chmod(d, 0o700)
+        CodexPatchTransaction.faultInjector = nil
+        CodexPatchTransaction.beforeRollbackHook = nil
+        CodexPatchTransaction.beforeRevalidateHook = nil
+        let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+        let accounted = leftovers.allSatisfy { r.text.contains($0) }
+        t.check("T.21 a temp whose unlink fails during rollback stays accounted for and is named (Codex S1 round 2)",
+                getuid() == 0 || (accounted && r.outcome.status == .partial && r.text.contains("Temporary files that could not be removed") == !leftovers.isEmpty
+                                  && !leftovers.isEmpty), "\(leftovers) \(r.text)")
+        for name in leftovers { unlink(d + "/" + name) }
     }
 
     final class HitFlag: @unchecked Sendable {

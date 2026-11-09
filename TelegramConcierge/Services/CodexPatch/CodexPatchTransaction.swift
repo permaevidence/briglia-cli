@@ -202,11 +202,20 @@ enum CodexPatchTransaction {
 
     /// Removes a staged temp that was not consumed (its own failure, or a
     /// revalidation mismatch).
+    /// The receipt is consumed only once the temp is known to be gone, or the
+    /// name no longer holds our inode (never removing another object's file);
+    /// a failed unlink keeps it so rollback retries and reports it (Codex S1
+    /// round 2).
     static func discard(_ staged: StagedFile, journal: Journal) {
         if let id = try? FileIdentity.lstatPath(staged.tempPath), id.inode == staged.identity.inode {
-            unlink(staged.tempPath)
+            guard unlink(staged.tempPath) == 0 else { return }
         }
         journal.consumeTemp(staged.tempPath)
+    }
+
+    /// Consumes a temp receipt only when the name is verifiably absent.
+    static func consumeIfGone(_ temp: String, journal: Journal) {
+        if case .some(.none) = try? FileIdentity.lstatPath(temp) { journal.consumeTemp(temp) }
     }
 
     // MARK: revalidate + replace / remove
@@ -288,7 +297,9 @@ enum CodexPatchTransaction {
                     throw StepError.io("could not move the new contents into place at \(display): \(why)")
                 }
             }
-            journal.consumeTemp(staged.tempPath)
+            // After a hard link the temp name is a second link to the new
+            // file; if its unlink failed the receipt stays (cleaned later).
+            consumeIfGone(staged.tempPath, journal: journal)
             // Bind the post-state to the staged inode (ctime moves on rename).
             var post: PostState? = nil
             if let now = try? FileIdentity.lstatPath(target), now.sameObjectIgnoringCtime(as: staged.identity) {
