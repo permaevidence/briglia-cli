@@ -80,6 +80,19 @@ BREAKS = [
      "cmd-token T7: a writer handed the token after waiting owns it", G,
      "            holder = token; holderTask = next.task; holderPhase = .preCommit; holderCancel = nil",
      "            holder = token; holderTask = nil; holderPhase = .preCommit; holderCancel = nil"),
+    ("K13 cancel waits for a finishing sign-in while holding the token (Codex 0.2.70 R1 cycle)",
+     "race telegram: cancel queued ahead of the sign-in's save answers", "TelegramConcierge/Services/SIWC/SIWCFlow.swift",
+     "            if SettingsClient.inProcessWriter?.gate.tokenHeldByCurrentTask != nil {",
+     "            if false, SettingsClient.inProcessWriter?.gate.tokenHeldByCurrentTask != nil {"),
+    ("K14 the same cycle on the terminal path",
+     "race terminal: cancel queued ahead of the sign-in's save answers", "TelegramConcierge/Services/SIWC/SIWCFlow.swift",
+     "            if SettingsClient.inProcessWriter?.gate.tokenHeldByCurrentTask != nil {",
+     "            if false, SettingsClient.inProcessWriter?.gate.tokenHeldByCurrentTask != nil {"),
+    ("K15 commitFromSettingsCommand trusts the inherited task-local token",
+     "commitFromSettingsCommand: a spawned task with the inherited token queues behind the holder",
+     "TelegramConcierge/Services/ConversationManager+SettingsWriter.swift",
+     "        if let token = Self.settingsCommandToken, settingsWriter.gate.tokenHeldByCurrentTask == token {",
+     "        if let token = Self.settingsCommandToken {"),
 ]
 
 

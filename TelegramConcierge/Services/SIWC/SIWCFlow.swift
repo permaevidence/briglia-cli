@@ -102,6 +102,7 @@ final class SIWCFlow {
     static let pasteHint = "Paste the address within about 5 minutes."
     static let cancelledMessage = "ChatGPT sign-in cancelled."
     static let savedNotSwitchedMessage = "Sign-in cancelled. ChatGPT had already returned the login, so it is saved, but Briglia did not switch to it. Use /subscription use or “Use ChatGPT” in briglia menu if you want it."
+    static let cancelWhileFinishingMessage = "Cancelling. This ChatGPT sign-in was already finishing, so Briglia won't switch to it; its own result message follows."
     static let cancelledElsewhere = "This ChatGPT sign-in was cancelled (a memory operation or a reset stopped it). Start it again."
     static let firstUseNotice = "You're using your ChatGPT plan. Briglia appears in ChatGPT Settings → Usage, where you can set its limit (Manage usage: chatgpt.com/settings/usage). " + SIWCPlanState.creditsNote
     static let telegramCaveat = "The sign-in code passes through Telegram's servers; the menu on the computer (or the phone app) avoids that when you can use it."
@@ -372,6 +373,15 @@ final class SIWCFlow {
         // ONE definitive outcome itself — saved-not-switched or not saved —
         // and every consumer gets that result (Codex D-R2 round 2).
         if status.state == "finishing" || status.state == "cancelling" {
+            // A settings command (Telegram or terminal /subscription cancel
+            // or failed) holds the writer's commit token in this task; the
+            // publication or cancellation it would wait for needs that very
+            // token, so waiting here would never end (Codex 0.2.70 R1). The
+            // revoked validity already decides the outcome (never switched);
+            // that sign-in reports its own result.
+            if SettingsClient.inProcessWriter?.gate.tokenHeldByCurrentTask != nil {
+                return Status(state: status.state, mode: s.mode, message: Self.cancelWhileFinishingMessage)
+            }
             return await waitForEnd()
         }
         status.state = "cancelling"   // a paste arriving now is refused

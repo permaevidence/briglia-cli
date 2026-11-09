@@ -512,7 +512,9 @@ extension SettingsWriter {
         SettingsSupersede.subscriptionChanged(store: store.directory.path)
         Self.finishAttempt(attempt, change: change, pending: nil, state: "applied", message: nil)
         if drained { SIWCFence.shared.unfence(key) }
-        // 5–6. Remote revoke outside every lock, after the token is released.
+        // 5–6. Remote revoke outside every lock, after the token is released
+        // (a reused token — Telegram/terminal /subscription logout official —
+        // stays held by its command until the command ends, revoke included).
         release()
         SIWCActivity.shared.beginRevoke()
         let confirmed = await revoke(tombstone)

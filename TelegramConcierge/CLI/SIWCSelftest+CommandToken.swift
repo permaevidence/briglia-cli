@@ -321,6 +321,61 @@ extension SIWCSelftest {
         c.check("telegram: /subscription failed answers with the generic help (no hang)",
                 third.replied && failed.replied && failed.released && !SIWCFlow.shared.isWaiting, failed.text)
 
+        // 6b. Codex 0.2.70 R1: cancel queued AHEAD of a publication. An
+        // earlier writer holds the token; the Telegram cancel queues first,
+        // the pasted sign-in's save second. Cancel must not wait (holding
+        // the token) for the save behind it: it answers, releases, the
+        // sign-in settles saved-not-switched and reports itself.
+        final class RaceLatch { var pasteDone = false }
+        func race(_ label: String, cancel: @escaping () async -> Void, cancelAnswered: @escaping () -> Bool) async {
+            let loginBefore = sent().count
+            await manager._testProcessUpdate(update(Int.random(in: 300...399), "/subscription login official"))
+            let waiting = await waitFor { SIWCFlow.shared.isWaiting && sent().count > loginBefore }
+            let latch = RaceLatch()
+            guard waiting, let blocker = await gate.acquire() else {
+                c.check("\(label): setup (a waiting sign-in, an earlier writer holding the token)", false); return
+            }
+            let before = sent().count
+            Task { @MainActor in await cancel() }
+            let cancelQueued = await waitFor { gate.queued == 1 }
+            let callback = callbackURL(SIWCFlow.shared.status, code: "RACE-\(label.count)")
+            Task { @MainActor in _ = await SIWCFlow.shared.paste(callback); latch.pasteDone = true }
+            let saveQueued = await waitFor { gate.queued == 2 && SIWCFlow.shared.status.state == "finishing" }
+            gate.release(blocker)
+            let settled = await waitFor(8) { latch.pasteDone && cancelAnswered() && !gate.isHeld && gate.queued == 0 }
+            let finalSent = await waitFor(3) { sent().dropFirst(before).contains(SIWCFlow.savedNotSwitchedMessage) }
+            c.check("\(label): cancel queued ahead of the sign-in's save answers; the save then runs (no cycle), token free",
+                    cancelQueued && saveQueued && settled, "queued \(cancelQueued)/\(saveQueued) paste \(latch.pasteDone) held \(gate.isHeld) q \(gate.queued) state \(SIWCFlow.shared.status.state)")
+            c.check("\(label): that sign-in reports “saved, not switched” itself", finalSent, sent().dropFirst(before).joined(separator: " | "))
+            if !settled { gate.closeAdmission(reason: "selftest cleanup"); _ = await waitFor(3) { latch.pasteDone }; gate.reopenAdmission() }
+        }
+        await race("race telegram", cancel: { await manager._testProcessUpdate(update(310, "/subscription cancel official")) },
+                   cancelAnswered: { sent().contains(SIWCFlow.cancelWhileFinishingMessage) })
+        final class Lines { var value: [String]? }
+        let termLines = Lines()
+        await race("race terminal", cancel: { termLines.value = await manager.handleTerminalCommand("/subscription cancel official") },
+                   cancelAnswered: { (termLines.value ?? []).joined().contains(SIWCFlow.cancelWhileFinishingMessage) })
+
+        // 6c. A task spawned inside a settings command inherits the
+        // command's task-local token but must not write under it.
+        let inherited = await finishes(within: 6) { () -> (Bool, Bool) in
+            guard let held = await gate.acquire(),
+                  let prepared = try? await SettingsCapture.prepareThrowing(origin: "selftest", label: "inherited", { try KeychainHelper.save(key: SIWCSurface.invitedKey, value: "1") })
+            else { return (false, false) }
+            let child = Outcome<SettingsCommitResult>()
+            ConversationManager.$settingsCommandToken.withValue(held) {
+                Task { @MainActor in child.value = await manager.commitFromSettingsCommand(prepared.change); child.done = true }
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            let waited = !child.done
+            gate.release(held)
+            let deadline = ProcessInfo.processInfo.systemUptime + 4
+            while !child.done, ProcessInfo.processInfo.systemUptime < deadline { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return (waited, child.value?.state == .applied)
+        }
+        c.check("commitFromSettingsCommand: a spawned task with the inherited token queues behind the holder, then applies",
+                inherited?.0 == true && inherited?.1 == true && !gate.isHeld, "\(String(describing: inherited))")
+
         // 7. The terminal chat (captured command, token acquired inline): the same commands.
         try? await Task.sleep(nanoseconds: 100_000_000)
         let termLogin = await finishes(within: 6) { await manager.handleTerminalCommand("/subscription login official") }
