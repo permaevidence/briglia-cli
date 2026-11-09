@@ -55,6 +55,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           PIN_GATE_GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_HISTORY_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [ "$REF_TYPE" = "tag" ] || { echo "✖ not a tag push"; exit 1; }
@@ -84,8 +85,12 @@ jobs:
           # PUBLISHED release with the committed key (enumerated, never
           # `latest` alone), then run the authorize checks of the reviewed
           # RELEASE_SECURITY.json against that history. Fails closed.
+          # The release listing authenticates with this run's own read-only
+          # token, scoped to this command only: anonymous API calls share the
+          # runner IP's 60/h limit, and a refusal here would burn the tag
+          # before signing (as the pin gate's did for v0.2.68).
           HISTORY="$(mktemp -d)"
-          python3 .github/scripts/release_security.py fetch-history \
+          GITHUB_TOKEN="$RELEASE_HISTORY_GITHUB_TOKEN" python3 .github/scripts/release_security.py fetch-history \
             --repo "$REPO" --pubkey "$EXPECTED_PUBKEY" --out "$HISTORY"
           python3 .github/scripts/release_security.py authorize \
             --file RELEASE_SECURITY.json --sequence "$SEQUENCE" --history "$HISTORY"
