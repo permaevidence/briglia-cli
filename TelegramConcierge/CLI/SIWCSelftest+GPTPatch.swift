@@ -117,11 +117,12 @@ extension SIWCSelftest {
                 (try? SIWCBody.namespaced([.object(["type": .string("custom_tool_call"), "call_id": .string("c"), "name": .string("apply_patch"),
                                                     "input": .string("x"), "namespace": .string("evil")])])) == nil)
 
-        // §5.6 on SIWC: the route's empty `response.incomplete` (probe P2 R5)
-        // → one transition, the same request resent once with apply_patch as a
+        // §5.6 on SIWC, positive evidence: a streamed grammar refusal →
+        // one transition, the same request resent once with apply_patch as a
         // namespaced function; one notice; recorded for this route key.
-        guard let (terminal, sawOutput) = GPTProfileSelftest.assemble(GPTProfileSelftest.emptyTerminalSSE("response.incomplete"), siwc: true),
-              !sawOutput else { c.check("gpt-patch: synthetic SIWC incomplete assembles", false); return }
+        let larkFailed: [String: Any] = ["error": ["code": "invalid_prompt", "message": "Invalid lark grammar. 1(3): x"]]
+        guard let (terminal, sawOutput) = GPTProfileSelftest.assemble(GPTProfileSelftest.emptyTerminalSSE("response.failed", extra: larkFailed), siwc: true),
+              !sawOutput else { c.check("gpt-patch: synthetic SIWC grammar refusal assembles", false); return }
         let notices = GPTProfileSelftest.NoticeBox()
         let run2 = EditingRun.start(context)
         run2.setNotifier { await notices.add($0) }
@@ -131,7 +132,7 @@ extension SIWCSelftest {
         let sentFirst = wire.count > before ? namespaceTools(wire.body(before)) : []
         let sentSecond = wire.count > before + 1 ? namespaceTools(wire.body(before + 1)) : []
         let notes = await notices.all
-        c.check("gpt-patch: SIWC empty incomplete → resent once in JSON form inside the namespace",
+        c.check("gpt-patch: SIWC streamed grammar refusal → resent once in JSON form inside the namespace",
                 response != nil && wire.count == before + 2
                 && sentFirst.contains { $0["type"]?.responsesString == "custom" }
                 && !sentSecond.contains { $0["type"]?.responsesString == "custom" }
@@ -140,6 +141,54 @@ extension SIWCSelftest {
                 run2.config == .gptJSON && notes == [GPTPatchRoute.transitionNotice]
                 && GPTPatchFormStore.shared.records().keys.contains { $0.hasPrefix("siwc|") }
                 && EditingConfig.resolveAtRunStart(context) == .gptJSON, "\(notes)")
+        // The route's own empty `response.incomplete` (probe P2 R5) is NOT a
+        // refusal (Codex S3 R1 F1): ordinary error, no resend, nothing recorded.
+        try? GPTPatchFormStore.shared.deleteAll()
+        for (label, extra) in [("no reason", [:]), ("server_error reason", ["incomplete_details": ["reason": "server_error"]]),
+                               ("unrelated error", ["error": ["code": "server_error", "message": "Temporary backend failure"]])] as [(String, [String: Any])] {
+            guard let (empty, _) = GPTProfileSelftest.assemble(GPTProfileSelftest.emptyTerminalSSE("response.incomplete", extra: extra), siwc: true) else {
+                c.check("gpt-patch: SIWC empty incomplete (\(label)) assembles", false); continue
+            }
+            let runI = EditingRun.start(context)
+            wire.replies = [.success(empty), .success(completed(text: "should not be sent"))]
+            let beforeI = wire.count
+            var surfaced = false
+            do { _ = try await send(run: runI) } catch {
+                if let failure = error as? ResponsesFailure, case .incomplete = failure { surfaced = true }
+            }
+            c.check("gpt-patch: SIWC empty incomplete (\(label)) surfaces as an ordinary incomplete: no resend, nothing recorded",
+                    surfaced && wire.count == beforeI + 1 && runI.config == .gptFreeform
+                    && GPTPatchFormStore.shared.records().isEmpty && EditingConfig.resolveAtRunStart(context) == .gptFreeform)
+            wire.replies = []
+        }
+        // §10 foreign-call repair, now on SIWC too (decodeRound): namespaced
+        // foreign edit calls decode as blocked calls in both directions; the
+        // namespace and every other decoder check still apply.
+        func fnCall(_ name: String, namespace: String?) -> [String: Any] {
+            var item: [String: Any] = ["type": "function_call", "id": "fc_r", "call_id": "call_r", "name": name, "arguments": "{\"path\":\"/a\"}", "status": "completed"]
+            if let namespace { item["namespace"] = namespace }
+            return item
+        }
+        var siwcRequest = URLRequest(url: URL(string: SIWCEndpoint.responsesURL)!)
+        siwcRequest.httpBody = Data("{}".utf8)
+        func repaired(_ name: String, namespace: String?, editing: EditingConfig, exposed: Set<String>) -> String? {
+            var ctx = context; ctx.editing = editing
+            let round = try? ResponsesAdapter.decodeRound(completedOutput([fnCall(name, namespace: namespace)]), request: siwcRequest, context: ctx,
+                                                          receipt: receipt, allowed: exposed, requiredNamespace: SIWCEndpoint.namespace,
+                                                          streamedOutput: false)
+            return round?.calls.first?.function.name
+        }
+        c.check("gpt-patch: SIWC repair: a GPT model's namespaced edit_file decodes as a blocked call (hint names apply_patch)",
+                repaired("edit_file", namespace: SIWCEndpoint.namespace, editing: .gptFreeform, exposed: ["apply_patch", "read_file"]) == "edit_file"
+                && GPTForeignCall.hint(name: "edit_file", editing: .gptFreeform, exposed: ["apply_patch", "read_file"]) != nil)
+        c.check("gpt-patch: SIWC repair: a standard model's namespaced apply_patch decodes as a blocked call (hint names edit_file)",
+                repaired("apply_patch", namespace: SIWCEndpoint.namespace, editing: .standard, exposed: ["edit_file", "read_file"]) == "apply_patch"
+                && GPTForeignCall.hint(name: "apply_patch", editing: .standard, exposed: ["edit_file", "read_file"]) != nil)
+        c.check("gpt-patch: SIWC repair keeps the namespace check (missing or foreign namespace refused)",
+                repaired("edit_file", namespace: nil, editing: .gptFreeform, exposed: ["apply_patch"]) == nil
+                && repaired("edit_file", namespace: "evil", editing: .gptFreeform, exposed: ["apply_patch"]) == nil)
+        c.check("gpt-patch: SIWC repair never admits an unrelated unexposed tool",
+                repaired("bash", namespace: SIWCEndpoint.namespace, editing: .gptFreeform, exposed: ["apply_patch"]) == nil)
         // A completed answer with no output is NOT a refusal on SIWC.
         try? GPTPatchFormStore.shared.deleteAll()
         let run3 = EditingRun.start(context)

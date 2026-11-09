@@ -399,9 +399,9 @@ extension ResponsesAdapter {
 extension ResponsesAdapter {
     /// Decodes one round of either Responses route (API/subscription or SIWC)
     /// with the editing configuration's freeform set and bounded foreign-call
-    /// repair. A terminal `failed`/`incomplete` answer that is a genuine
-    /// refusal of the freeform patch tool (GPT_APPLY_PATCH_PLAN §5.6, stage 3
-    /// streamed shapes) is rethrown as `GPTCustomToolRejection.Rejected`, so
+    /// repair. A terminal `failed` answer that is a genuine refusal of the
+    /// freeform patch tool's grammar (GPT_APPLY_PATCH_PLAN §5.6, stage 3
+    /// streamed shape) is rethrown as `GPTCustomToolRejection.Rejected`, so
     /// the run's one freeform → JSON transition applies; every other decode
     /// error is unchanged.
     static func decodeRound(_ bytes: Data, request: URLRequest, context: ProviderExecutionContext,
@@ -413,10 +413,8 @@ extension ResponsesAdapter {
                                                     blockedForeignNames: blockedForeignNames(context.editing, exposed: allowed),
                                                     freeformTools: freeformTools(context, exposed: allowed))
         } catch {
-            let chatGPTRoute = context.subscriptionGeneration != nil || context.siwc != nil || context.siwcFailure != nil
             if let refusal = GPTCustomToolRejection.classifyTerminal(bytes, requestBody: request.httpBody,
-                                                                     chatGPTRoute: chatGPTRoute, streamedOutput: streamedOutput,
-                                                                     underlying: error) {
+                                                                     streamedOutput: streamedOutput, underlying: error) {
                 throw refusal
             }
             throw error

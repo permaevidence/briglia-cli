@@ -203,38 +203,42 @@ BREAKS = [
     ("C2 SIWC capability rule ignores the param", "Y SIWC unsupported_capability elsewhere does not classify", [(C + "GPTFreeform.swift",
         "        guard entries.contains(where: { param == $0.param || namesTypeOrFormat(param, $0.param) }) else { return nil }\n", "")]),
     ("T1 streamed grammar refusal not recognised", "Y live SSE fixture or-badgrammar.json: stream-classified = true", [(C + "GPTFreeform.swift",
-        "                  message.hasPrefix(larkRefusalPrefix) else { return nil }",
-        "                  message.hasPrefix(larkRefusalPrefix), false else { return nil }")]),
-    ("T2 any streamed failure classified", "Y live SSE fixture or-badgrammar-bedrock.json: stream-classified = false", [(C + "GPTFreeform.swift",
-        "            guard let error = object[\"error\"] as? [String: Any], let message = error[\"message\"] as? String,\n                  message.hasPrefix(larkRefusalPrefix) else { return nil }",
-        "            guard object[\"error\"] is [String: Any] else { return nil }")]),
-    ("T3 empty incomplete classified on every route", "Y empty incomplete on a non-ChatGPT route never classifies", [(C + "GPTFreeform.swift",
-        "            guard chatGPTRoute else { return nil }\n", "")]),
-    ("T4 ordinary incomplete reasons classified", "Y ChatGPT incomplete: max_output_tokens is ordinary", [(C + "GPTFreeform.swift",
-        "                if let reason = details[\"reason\"] as? String, ordinaryIncompleteReasons.contains(reason) { return nil }\n", "")]),
-    ("T5 output tokens ignored", "Y ChatGPT incomplete with output tokens is ordinary", [(C + "GPTFreeform.swift",
-        "let outputTokens = usage[\"output_tokens\"] as? Int, outputTokens > 0 {",
-        "let outputTokens = usage[\"output_tokens\"] as? Int, outputTokens > 0, false {")]),
-    ("T6 streamed output ignored", "Y ChatGPT incomplete with a streamed output item is ordinary", [(C + "GPTFreeform.swift",
-        "        guard !streamedOutput, bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,",
-        "        guard bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,")]),
+        "              message.hasPrefix(larkRefusalPrefix) else { return nil }",
+        "              message.hasPrefix(larkRefusalPrefix), false else { return nil }")]),
     ("T7 assembler does not record streamed output", "Y ChatGPT incomplete with a streamed output item is ordinary", [
         (S + "ResponsesStream.swift", "        if type.hasSuffix(\".delta\") || type.hasPrefix(\"response.output_\") || type.hasPrefix(\"response.content_part\")",
          "        if type.hasSuffix(\".delta\") || type.hasPrefix(\"response.content_part\")"),
         (S + "ResponsesStream.swift", "        case \"response.output_item.added\", \"response.output_item.done\":\n            sawOutput = true\n",
          "        case \"response.output_item.added\", \"response.output_item.done\":\n")]),
+    ("T2 any streamed failure classified", "Y live SSE fixture or-badgrammar-bedrock.json: stream-classified = false", [(C + "GPTFreeform.swift",
+        "              let error = object[\"error\"] as? [String: Any], let message = error[\"message\"] as? String,\n              message.hasPrefix(larkRefusalPrefix) else { return nil }",
+        "              object[\"error\"] is [String: Any] else { return nil }")]),
+    ("F1 ambiguous empty incomplete classified again (Codex S3 R1)", "Y ChatGPT empty incomplete (no reason) is not a refusal", [(C + "GPTFreeform.swift",
+        "              object[\"status\"] as? String == \"failed\",", "              object[\"status\"] != nil,"),
+        (C + "GPTFreeform.swift",
+        "              let error = object[\"error\"] as? [String: Any], let message = error[\"message\"] as? String,\n              message.hasPrefix(larkRefusalPrefix) else { return nil }",
+        "              true else { return nil }")]),
+    ("F1b SIWC empty incomplete transitions (Codex S3 R1)", "gpt-patch: SIWC empty incomplete (no reason) surfaces", [(C + "GPTFreeform.swift",
+        "              object[\"status\"] as? String == \"failed\",", "              object[\"status\"] != nil,"),
+        (C + "GPTFreeform.swift",
+        "              let error = object[\"error\"] as? [String: Any], let message = error[\"message\"] as? String,\n              message.hasPrefix(larkRefusalPrefix) else { return nil }",
+        "              true else { return nil }")], SIWC_RUN),
+    ("T6 streamed output ignored", "Y a lark failure after a streamed output item is not a refusal", [(C + "GPTFreeform.swift",
+        "        guard !streamedOutput, bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,",
+        "        guard bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,")]),
+    ("T8 terminal output ignored", "Y a lark failure with terminal output is not a refusal", [(C + "GPTFreeform.swift",
+        "              let output = object[\"output\"] as? [Any], output.isEmpty,", "              object[\"output\"] is [Any],")]),
+    ("T12 output array not required", "Y a lark failure without an explicit output array is not a refusal", [(C + "GPTFreeform.swift",
+        "              let output = object[\"output\"] as? [Any], output.isEmpty,", "              (object[\"output\"] as? [Any])?.isEmpty != false,")]),
+    ("T9 decode does not classify streamed refusals", "Y decodeRound: a streamed grammar refusal becomes", [(S + "ResponsesAdapter.swift",
+        "            if let refusal = GPTCustomToolRejection.classifyTerminal(",
+        "            if false, let refusal = GPTCustomToolRejection.classifyTerminal(")]),
     ("T11 terminal capped at an error body's size", "Y a lark refusal whose terminal echoes a large tool list", [(C + "GPTFreeform.swift",
         "        guard !streamedOutput, bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,",
         "        guard !streamedOutput, bytes.count <= 64 * 1024, !customEntries(requestBody).isEmpty,")]),
-    ("T8 terminal output ignored", "Y incomplete with terminal output is ordinary", [(C + "GPTFreeform.swift",
-        "            guard let items = output as? [Any], items.isEmpty else { return nil }",
-        "            guard output is [Any] else { return nil }")]),
-    ("T9 decode does not classify streamed refusals", "Y decodeRound: a ChatGPT empty incomplete becomes", [(S + "ResponsesAdapter.swift",
-        "            if let refusal = GPTCustomToolRejection.classifyTerminal(",
-        "            if false, let refusal = GPTCustomToolRejection.classifyTerminal(")]),
-    ("T10 every route treated as ChatGPT", "Y decodeRound: the same terminal elsewhere stays an ordinary incomplete", [(S + "ResponsesAdapter.swift",
-        "            let chatGPTRoute = context.subscriptionGeneration != nil || context.siwc != nil || context.siwcFailure != nil",
-        "            let chatGPTRoute = true")]),
+    ("S3e SIWC loses the foreign-call repair", "gpt-patch: SIWC repair: a GPT model's namespaced edit_file", [(S + "ResponsesAdapter.swift",
+        "                                                    blockedForeignNames: blockedForeignNames(context.editing, exposed: allowed),",
+        "                                                    blockedForeignNames: requiredNamespace == nil ? blockedForeignNames(context.editing, exposed: allowed) : [],")], SIWC_RUN),
     ("W3 legacy request keeps apply_patch a function", "Y legacy ChatGPT request: Codex grammar tool", [(S + "ResponsesAdapter.swift",
         "                if context.editing.form == .freeform, tool.function.name == \"apply_patch\" { return GPTFreeform.customToolEntry() }",
         "                if context.editing.form == .freeform, tool.function.name == \"apply_patch\", context.subscriptionGeneration == nil { return GPTFreeform.customToolEntry() }")]),
@@ -309,10 +313,10 @@ def main():
     failures = executed = 0
     try:
         binary = build(tree, scratch)
-        for args in (GP_RUN, SIWC_RUN, SUB_RUN):
-            r = selftest(binary, work, args)
+        for control in (GP_RUN, SIWC_RUN, SUB_RUN):
+            r = selftest(binary, work, control)
             ok = r.returncode == 0
-            print(("✔" if ok else "✖") + f" positive control: the unmodified copy passes {args[0]}", flush=True)
+            print(("✔" if ok else "✖") + f" positive control: the unmodified copy passes {control[0]}", flush=True)
             if not ok:
                 print((r.stdout + r.stderr)[-3000:])
                 return 1

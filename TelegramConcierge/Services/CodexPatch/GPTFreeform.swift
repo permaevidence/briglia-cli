@@ -65,7 +65,7 @@ enum GPTFreeform {
 /// `tools[k]` or, on Sign in with ChatGPT where every tool sits inside the
 /// `briglia` namespace, `tools[i].tools[j]` (`customEntries`); SIWC's own
 /// `unsupported_capability` naming that entry (`classifySIWCCapability`);
-/// and the HTTP-200 streamed refusals (`classifyTerminal`).
+/// and the HTTP-200 streamed grammar refusal (`classifyTerminal`).
 enum GPTCustomToolRejection {
     struct Rejected: Error, LocalizedError {
         let status: Int
@@ -174,58 +174,36 @@ enum GPTCustomToolRejection {
         return Rejected(status: status, detail: "unsupported_capability at \(param)", underlying: underlying)
     }
 
-    /// Terminal-answer reasons that are ordinary model outcomes, never a
-    /// tool-format refusal.
-    static let ordinaryIncompleteReasons: Set<String> = ["max_output_tokens", "content_filter"]
-
     /// §5.6 streamed refusals (stage 3): HTTP 200 whose stream ends in a
-    /// `response.failed` or `response.incomplete` terminal instead of an
-    /// HTTP 400. `bytes` is the terminal snapshot the stream assembled (or
-    /// the JSON body). Produced only when ALL hold: the request carried a
-    /// `custom` entry (top level or in a namespace); the stream carried no
-    /// output item and no delta of any kind (`streamedOutput == false`); the
-    /// terminal's `output` is empty; and either
-    /// - `failed` with an error whose message starts "Invalid lark grammar"
-    ///   (any code; OpenRouter automatic routing, captured 2026-11-09:
-    ///   code `invalid_prompt`). A generic failure (`server_error`
-    ///   "Provider returned an empty response", Bedrock, same capture) never
-    ///   classifies; or
-    /// - `incomplete` on a ChatGPT route (legacy or SIWC; probes P1/P2 R5,
-    ///   2026-11-09: a malformed grammar ended this way on both, with no
-    ///   output) whose reason is absent or not an ordinary outcome
-    ///   (`max_output_tokens`, `content_filter`) and that reports no output
-    ///   tokens. Never on any other route.
-    /// Cancellations, usage limits (typed earlier by the stream), transport
-    /// errors and completed-but-empty answers never reach this rule.
-    static func classifyTerminal(_ bytes: Data, requestBody: Data?, chatGPTRoute: Bool, streamedOutput: Bool,
-                                 underlying: Error) -> Error? {
+    /// `response.failed` terminal instead of an HTTP 400. `bytes` is the
+    /// terminal snapshot the stream assembled (or the JSON body). Produced
+    /// only when ALL hold: the request carried a `custom` entry (top level or
+    /// in a namespace); the stream carried no output item and no delta of any
+    /// kind (`streamedOutput == false`); the terminal has an explicit, empty
+    /// `output` array; its status is `failed`; and its error message starts
+    /// "Invalid lark grammar" (any code; OpenRouter automatic routing,
+    /// captured 2026-11-09: code `invalid_prompt`) — positive evidence that
+    /// the host refused the patch tool's grammar. A generic failure
+    /// (`server_error` "Provider returned an empty response", Bedrock, same
+    /// capture) never classifies.
+    ///
+    /// Deliberately NOT classified (Codex S3 R1 F1): the ChatGPT routes'
+    /// empty `response.incomplete` (probes P1/P2 R5 with a malformed grammar).
+    /// An empty incomplete answer does not say why it stopped, and a
+    /// classification records a persistent per-route downgrade; it surfaces
+    /// as an ordinary incomplete error. Revisit only with a captured body
+    /// that names the tool or grammar.
+    static func classifyTerminal(_ bytes: Data, requestBody: Data?, streamedOutput: Bool, underlying: Error) -> Error? {
         // One terminal record at most (the stream's own record bound): the
         // snapshot echoes the request's whole tool list on some hosts
         // (OpenRouter), far above an error body's 64 KiB.
         guard !streamedOutput, bytes.count <= ResponsesLimits.recordBytes, !customEntries(requestBody).isEmpty,
               let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
-              let status = object["status"] as? String else { return nil }
-        if let output = object["output"] {
-            guard let items = output as? [Any], items.isEmpty else { return nil }
-        }
-        switch status {
-        case "failed":
-            guard let error = object["error"] as? [String: Any], let message = error["message"] as? String,
-                  message.hasPrefix(larkRefusalPrefix) else { return nil }
-            return Rejected(status: 200, detail: "grammar refused in the stream", underlying: underlying)
-        case "incomplete":
-            guard chatGPTRoute else { return nil }
-            if let details = object["incomplete_details"], !(details is NSNull) {
-                guard let details = details as? [String: Any] else { return nil }
-                if let reason = details["reason"] as? String, ordinaryIncompleteReasons.contains(reason) { return nil }
-            }
-            if let usage = object["usage"] as? [String: Any], let outputTokens = usage["output_tokens"] as? Int, outputTokens > 0 {
-                return nil
-            }
-            return Rejected(status: 200, detail: "empty incomplete answer to the freeform tool", underlying: underlying)
-        default:
-            return nil
-        }
+              object["status"] as? String == "failed",
+              let output = object["output"] as? [Any], output.isEmpty,
+              let error = object["error"] as? [String: Any], let message = error["message"] as? String,
+              message.hasPrefix(larkRefusalPrefix) else { return nil }
+        return Rejected(status: 200, detail: "grammar refused in the stream", underlying: underlying)
     }
 
     static let larkRefusalPrefix = "Invalid lark grammar"

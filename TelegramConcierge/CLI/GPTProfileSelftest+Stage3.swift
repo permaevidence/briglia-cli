@@ -135,61 +135,67 @@ extension GPTProfileSelftest {
                       let requestData = try? JSONSerialization.data(withJSONObject: request) else { continue }
                 streamed += 1
                 guard let (terminal, sawOutput) = assemble(body) else { t.check("Y live SSE fixture \(file) assembles", false); continue }
-                let fires = GPTCustomToolRejection.classifyTerminal(terminal, requestBody: requestData, chatGPTRoute: false,
-                                                                    streamedOutput: sawOutput, underlying: underlying) != nil
+                let fires = GPTCustomToolRejection.classifyTerminal(terminal, requestBody: requestData, streamedOutput: sawOutput, underlying: underlying) != nil
                 t.check("Y live SSE fixture \(file): stream-classified = \(expect)", fires == expect)
                 if expect {
                     let without = Data(jsonText(["tools": [["type": "function", "name": "apply_patch"]]]).utf8)
                     t.check("Y live SSE fixture \(file): not classified without a custom entry",
-                            GPTCustomToolRejection.classifyTerminal(terminal, requestBody: without, chatGPTRoute: false,
-                                                                    streamedOutput: false, underlying: underlying) == nil)
+                            GPTCustomToolRejection.classifyTerminal(terminal, requestBody: without, streamedOutput: false, underlying: underlying) == nil)
                     t.check("Y live SSE fixture \(file): not classified when output streamed",
-                            GPTCustomToolRejection.classifyTerminal(terminal, requestBody: requestData, chatGPTRoute: false,
-                                                                    streamedOutput: true, underlying: underlying) == nil)
+                            GPTCustomToolRejection.classifyTerminal(terminal, requestBody: requestData, streamedOutput: true, underlying: underlying) == nil)
                 }
             }
         }
         t.check("Y live SSE fixtures: both streamed captures are covered", streamed >= 2, "\(streamed)")
 
-        // The ChatGPT routes' shape (probes P1/P2 R5, 2026-11-09: HTTP 200,
-        // `response.incomplete`, no output items). Synthetic events built from
-        // the recorded summary; the incomplete reason was not recorded, so
-        // every reason variant is pinned here.
-        func incomplete(_ extra: [String: Any] = [:], subscription: Bool = true, siwc: Bool = false, chatGPT: Bool = true,
-                        request: Data? = topLevel, streamItem: Bool = false, textDelta: Bool = false) -> Bool? {
+        // The ChatGPT routes' malformed-grammar shape (probes P1/P2 R5,
+        // 2026-11-09: HTTP 200, `response.incomplete`, no output) is NOT a
+        // refusal for Briglia (Codex S3 R1 F1): an empty incomplete answer does
+        // not say why it stopped and a classification records a persistent
+        // downgrade. Every variant, including Codex's, stays ordinary.
+        func incomplete(_ extra: [String: Any] = [:], subscription: Bool = true, siwc: Bool = false,
+                        request: Data? = topLevel) -> Bool? {
             // nil = the fixture did not assemble (never counts as a pass).
-            guard let (terminal, sawOutput) = assemble(emptyTerminalSSE("response.incomplete", extra: extra, streamItem: streamItem, textDelta: textDelta),
+            guard let (terminal, sawOutput) = assemble(emptyTerminalSSE("response.incomplete", extra: extra),
                                                        subscription: subscription, siwc: siwc) else { return nil }
-            return GPTCustomToolRejection.classifyTerminal(terminal, requestBody: request, chatGPTRoute: chatGPT,
+            return GPTCustomToolRejection.classifyTerminal(terminal, requestBody: request,
                                                            streamedOutput: sawOutput, underlying: underlying) != nil
         }
-        t.check("Y ChatGPT empty incomplete classifies (no reason)", incomplete() == true)
-        t.check("Y ChatGPT empty incomplete classifies (null details, zero output tokens)",
-                incomplete(["incomplete_details": NSNull(), "usage": ["input_tokens": 400, "output_tokens": 0]]) == true)
-        t.check("Y SIWC empty incomplete with a namespaced entry classifies", incomplete(subscription: false, siwc: true, request: namespaced) == true)
-        t.check("Y ChatGPT incomplete: max_output_tokens is ordinary", incomplete(["incomplete_details": ["reason": "max_output_tokens"]]) == false)
-        t.check("Y ChatGPT incomplete: content_filter is ordinary", incomplete(["incomplete_details": ["reason": "content_filter"]]) == false)
-        t.check("Y ChatGPT incomplete with output tokens is ordinary", incomplete(["usage": ["input_tokens": 400, "output_tokens": 12]]) == false)
-        t.check("Y ChatGPT incomplete with a streamed output item is ordinary", incomplete(streamItem: true) == false)
-        t.check("Y ChatGPT incomplete with streamed text is ordinary", incomplete(textDelta: true) == false)
-        t.check("Y incomplete with terminal output is ordinary",
-                incomplete(["output": [["type": "message", "id": "m", "role": "assistant", "content": []]]]) == false)
-        t.check("Y empty incomplete on a non-ChatGPT route never classifies", incomplete(subscription: false, chatGPT: false) == false)
-        t.check("Y empty incomplete without a custom entry never classifies", incomplete(request: namespacedNoCustom) == false
-                && incomplete(request: nil) == false)
-        // Generic failures and other terminals never classify.
-        func terminalFires(_ type: String, _ extra: [String: Any], chatGPT: Bool = true) -> Bool? {
-            guard let (terminal, sawOutput) = assemble(emptyTerminalSSE(type, extra: extra), subscription: chatGPT) else { return nil }
-            return GPTCustomToolRejection.classifyTerminal(terminal, requestBody: topLevel, chatGPTRoute: chatGPT,
+        t.check("Y ChatGPT empty incomplete (no reason) is not a refusal (Codex S3 R1 F1)", incomplete() == false)
+        t.check("Y SIWC empty incomplete with a namespaced entry is not a refusal", incomplete(subscription: false, siwc: true, request: namespaced) == false)
+        t.check("Y empty incomplete variants are not refusals (null details, zero tokens, server_error reason, numeric reason, unrelated error)",
+                incomplete(["incomplete_details": NSNull(), "usage": ["input_tokens": 400, "output_tokens": 0]]) == false
+                && incomplete(["incomplete_details": ["reason": "server_error"], "usage": ["output_tokens": 0]]) == false
+                && incomplete(["incomplete_details": ["reason": 42]]) == false
+                && incomplete(["error": ["code": "server_error", "message": "Temporary backend failure"]]) == false)
+        t.check("Y even an incomplete whose details mention a grammar is not a refusal",
+                incomplete(["incomplete_details": ["reason": "Invalid lark grammar"]]) == false)
+        // Streamed failures: only the positive grammar evidence classifies.
+        func terminalFires(_ type: String, _ extra: [String: Any], streamItem: Bool = false, textDelta: Bool = false,
+                           request: Data? = topLevel) -> Bool? {
+            guard let (terminal, sawOutput) = assemble(emptyTerminalSSE(type, extra: extra, streamItem: streamItem, textDelta: textDelta),
+                                                       subscription: true) else { return nil }
+            return GPTCustomToolRejection.classifyTerminal(terminal, requestBody: request,
                                                            streamedOutput: sawOutput, underlying: underlying) != nil
         }
+        let lark: [String: Any] = ["error": ["code": "invalid_prompt", "message": "Invalid lark grammar. 1(3): x"]]
         t.check("Y a generic streamed failure never classifies",
                 terminalFires("response.failed", ["error": ["code": "server_error", "message": "Provider returned an empty response"]]) == false
                 && terminalFires("response.failed", ["error": ["code": "invalid_prompt", "message": "Something else about the prompt"]]) == false
                 && terminalFires("response.failed", [:]) == false)
-        t.check("Y a streamed lark-grammar failure classifies on every route",
-                terminalFires("response.failed", ["error": ["code": "invalid_prompt", "message": "Invalid lark grammar. 1(3): x"]], chatGPT: false) == true
+        t.check("Y a streamed lark-grammar failure classifies (any code)",
+                terminalFires("response.failed", lark) == true
                 && terminalFires("response.failed", ["error": ["code": NSNull(), "message": "Invalid lark grammar. 1(3): x"]]) == true)
+        t.check("Y a lark failure after a streamed output item is not a refusal", terminalFires("response.failed", lark, streamItem: true) == false)
+        t.check("Y a lark failure after streamed text is not a refusal", terminalFires("response.failed", lark, textDelta: true) == false)
+        t.check("Y a lark failure without a custom entry is not a refusal",
+                terminalFires("response.failed", lark, request: namespacedNoCustom) == false && terminalFires("response.failed", lark, request: nil) == false)
+        t.check("Y a namespaced custom entry admits the lark rule", terminalFires("response.failed", lark, request: namespaced) == true)
+        t.check("Y a lark failure with terminal output is not a refusal",
+                terminalFires("response.failed", lark.merging(["output": [["type": "message", "id": "m", "role": "assistant", "content": []]]]) { a, _ in a }) == false)
+        let noOutputField = jsonText(["id": "r", "status": "failed", "error": ["code": "invalid_prompt", "message": "Invalid lark grammar. x"]])
+        t.check("Y a lark failure without an explicit output array is not a refusal",
+                GPTCustomToolRejection.classifyTerminal(Data(noOutputField.utf8), requestBody: topLevel, streamedOutput: false, underlying: underlying) == nil)
         // Real Briglia requests carry ~30 tools that OpenRouter echoes in the
         // terminal snapshot: far above 64 KiB.
         let echoedTools: [[String: Any]] = (0..<120).map { ["type": "function", "name": "tool_\($0)", "description": String(repeating: "d", count: 1_000)] }
@@ -197,15 +203,17 @@ extension GPTProfileSelftest {
                                   "error": ["code": "invalid_prompt", "message": "Invalid lark grammar. 1(3): x"]])
         t.check("Y a lark refusal whose terminal echoes a large tool list (>64 KiB) still classifies",
                 bigFailed.utf8.count > 64 * 1024
-                && GPTCustomToolRejection.classifyTerminal(Data(bigFailed.utf8), requestBody: topLevel, chatGPTRoute: false,
+                && GPTCustomToolRejection.classifyTerminal(Data(bigFailed.utf8), requestBody: topLevel,
                                                            streamedOutput: false, underlying: underlying) != nil)
         t.check("Y a completed-but-empty answer never classifies",
-                GPTCustomToolRejection.classifyTerminal(Data(reply([]).utf8), requestBody: topLevel, chatGPTRoute: true,
+                GPTCustomToolRejection.classifyTerminal(Data(reply([]).utf8), requestBody: topLevel,
                                                         streamedOutput: false, underlying: underlying) == nil)
 
-        // decodeRound (the adapter's one decode): the classification reaches
-        // the run as Rejected with the decoder's own error underneath.
-        if let (terminal, _) = assemble(emptyTerminalSSE("response.incomplete"), subscription: true) {
+        // decodeRound (the adapter's one decode): a streamed grammar refusal
+        // reaches the run as Rejected with the decoder's own error underneath;
+        // a ChatGPT empty incomplete stays an ordinary incomplete.
+        if let (terminal, _) = assemble(emptyTerminalSSE("response.incomplete"), subscription: true),
+           let (failed, _) = assemble(emptyTerminalSSE("response.failed", extra: lark), subscription: true) {
             var request = URLRequest(url: URL(string: SubscriptionEndpoint.inference)!)
             request.httpBody = topLevel
             let receipt = PreparedRequestReceipt(requestID: UUID(), historyFingerprint: "y", deliveryNonces: [])
@@ -213,19 +221,27 @@ extension GPTProfileSelftest {
             do {
                 _ = try ResponsesAdapter.decodeRound(terminal, request: request, context: legacyCtx, receipt: receipt,
                                                      allowed: ["apply_patch"], requiredNamespace: nil, streamedOutput: false)
-                t.check("Y decodeRound: a ChatGPT empty incomplete becomes a freeform rejection", false)
+                t.check("Y decodeRound: a ChatGPT empty incomplete stays an ordinary incomplete", false)
+            } catch {
+                var ordinary = false
+                if let failure = error as? ResponsesFailure, case .incomplete = failure { ordinary = true }
+                t.check("Y decodeRound: a ChatGPT empty incomplete stays an ordinary incomplete", ordinary, "\(error)")
+            }
+            do {
+                _ = try ResponsesAdapter.decodeRound(failed, request: request, context: legacyCtx, receipt: receipt,
+                                                     allowed: ["apply_patch"], requiredNamespace: nil, streamedOutput: false)
+                t.check("Y decodeRound: a streamed grammar refusal becomes a freeform rejection", false)
             } catch let rejected as GPTCustomToolRejection.Rejected {
                 var kept = false
-                if let failure = rejected.underlying as? ResponsesFailure, case .incomplete = failure { kept = true }
-                t.check("Y decodeRound: a ChatGPT empty incomplete becomes a freeform rejection (underlying kept)", kept, "\(rejected.underlying)")
-            } catch { t.check("Y decodeRound: a ChatGPT empty incomplete becomes a freeform rejection", false, "\(error)") }
-            let api = responses("gpt-6-luna", base: "https://openrouter.ai/api/v1")
+                if let failure = rejected.underlying as? ResponsesFailure, case .failed = failure { kept = true }
+                t.check("Y decodeRound: a streamed grammar refusal becomes a freeform rejection (underlying kept)", kept, "\(rejected.underlying)")
+            } catch { t.check("Y decodeRound: a streamed grammar refusal becomes a freeform rejection", false, "\(error)") }
             do {
-                _ = try ResponsesAdapter.decodeRound(terminal, request: request, context: api, receipt: receipt,
-                                                     allowed: ["apply_patch"], requiredNamespace: nil, streamedOutput: false)
-                t.check("Y decodeRound: the same terminal elsewhere stays an ordinary incomplete", false)
+                _ = try ResponsesAdapter.decodeRound(failed, request: request, context: legacyCtx, receipt: receipt,
+                                                     allowed: ["apply_patch"], requiredNamespace: nil, streamedOutput: true)
+                t.check("Y decodeRound: with streamed output the same failure stays ordinary", false)
             } catch {
-                t.check("Y decodeRound: the same terminal elsewhere stays an ordinary incomplete", !(error is GPTCustomToolRejection.Rejected))
+                t.check("Y decodeRound: with streamed output the same failure stays ordinary", !(error is GPTCustomToolRejection.Rejected))
             }
         } else { t.check("Y synthetic incomplete assembles", false) }
 
