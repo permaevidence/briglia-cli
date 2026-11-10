@@ -147,6 +147,9 @@ final class RuntimeHarness {
         await section("node: selection and private copy") { try await nodeSelection() }
         await section("python: base choice (pure)") { pythonBaseChoice() }
         await section("python: private venv") { try await pythonEnv() }
+        #if os(macOS)
+        await section("python: Homebrew install (macOS)") { try await pythonHomebrewGuards() }
+        #endif
         await section("path contract") { pathContract() }
     }
 
@@ -1023,6 +1026,10 @@ final class RuntimeHarness {
         try await pythonBaseSelection(found: found)
         print("\n[python: missing venv (Debian/Ubuntu python3.X-venv)]")
         try await pythonMissingVenv(found: found)
+        #if os(macOS)
+        print("\n[python: Homebrew install, then build (macOS)]")
+        try await pythonHomebrewBuild(found: found)
+        #endif
         for k in ["BRIGLIA_PYTHON_TEST_BASE_DIRS", "BRIGLIA_PYTHON_MIN_MINOR", "BRIGLIA_PYTHON_TEST_FIND_LINKS", "BRIGLIA_PYTHON_TEST_PROBE", "BRIGLIA_PYTHON_TEST_LOCK"] { unsetenv(k) }
     }
 

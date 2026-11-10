@@ -187,7 +187,11 @@ enum PythonRuntime {
         #if os(Linux)
         return "install Python 3.\(minimumMinor)–3.\(maximumMinor) with venv support (Debian/Ubuntu: `sudo apt install python3-venv`)"
         #else
-        return "install Python 3.\(minimumMinor)–3.\(maximumMinor) (`brew install python@3.\(maximumMinor)`)"
+        let formula = homebrewPythonFormula
+        guard homebrewAvailable() else {
+            return "install Python 3.\(minimumMinor)–3.\(maximumMinor) — Homebrew isn't installed: get Python 3.\(effectiveMaximumMinor) from https://www.python.org/downloads/macos/ (or install Homebrew from https://brew.sh, then `brew install \(formula)`), then run `briglia python-env install`" + homebrewKegHint()
+        }
+        return "install Python 3.\(minimumMinor)–3.\(maximumMinor) (`brew install \(formula)`), then run `briglia python-env install`" + homebrewKegHint()
         #endif
     }
 
@@ -202,7 +206,10 @@ enum PythonRuntime {
             #if os(Linux)
             let how = "install Python 3.\(maximumMinor) (or 3.\(minimumMinor)–3.\(maximumMinor)) with venv support next to it"
             #else
-            let how = "install Python 3.\(maximumMinor) (`brew install python@3.\(maximumMinor)`); it can stay next to \(short)"
+            let how = (homebrewAvailable()
+                ? "install Python 3.\(effectiveMaximumMinor) (`brew install \(homebrewPythonFormula)`; \(short) can stay), then run `briglia python-env install`"
+                : "install Python 3.\(effectiveMaximumMinor) from https://www.python.org/downloads/macos/ (\(short) can stay), then run `briglia python-env install`")
+                + homebrewKegHint()
             #endif
             return "Python \(short) isn't supported yet — \(how)" + detail
         }
@@ -267,6 +274,130 @@ enum PythonRuntime {
         return "not supported on this system"
         #endif
     }
+
+    #if os(macOS)
+    // MARK: No usable Python (macOS): Homebrew's python@3.<max>
+
+    /// The formula for the newest minor the lock covers (python@3.14 today):
+    /// derived from the supported maximum, never a literal, so raising
+    /// `maximumMinor` moves it too (owner, 2026-11-10).
+    static var homebrewPythonFormula: String { "python@3.\(effectiveMaximumMinor)" }
+
+    /// Every `brew install` of it: no `brew update` first (like the menu's
+    /// other brew jobs), no upgrade of the formula when it is already
+    /// installed, no upgrade or reinstall of installed dependents, no cleanup
+    /// sweep (Codex plan review r1). Homebrew may still install or upgrade
+    /// what the formula itself requires. Briglia never runs link, unlink or
+    /// upgrade.
+    static let homebrewInstallEnvironment = ["HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_INSTALL_UPGRADE": "1",
+                                             "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1"]
+
+    /// The formula the tools install must add before its `briglia python-env
+    /// install` job: only when NO usable Python 3.11–3.<max> exists anywhere
+    /// Briglia scans (Apple's 3.9 only, only a newer one, none). nil otherwise.
+    static func homebrewPythonFormulaNeededBlocking() -> String? {
+        selectBaseBlocking().base == nil ? homebrewPythonFormula : nil
+    }
+
+    /// Homebrew present (selftests: the fake installer, or forced absent).
+    static func homebrewAvailable() -> Bool {
+        if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_NO_HOMEBREW") == "1" { return false }
+        if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BREW_INSTALLER") != nil { return true }
+        return ToolchainService.brewPath() != nil
+    }
+
+    /// An install the user started from a terminal: a tty on stdin, Homebrew
+    /// present, and not the agent's shell (BashTools puts BRIGLIA_PATH_FRONT
+    /// in every agent Bash environment). The daemon (`.auto`), the menu's
+    /// detached python-env job (stdin /dev/null) and the agent's Bash never
+    /// get here; the menu plans the formula as its own job instead
+    /// (QuickSetupEnvironment.defaultToolchainJobs). Selftests never reach
+    /// the real Homebrew: with the base-dir seam set, only the fake installs.
+    static func canInstallPythonInteractively() -> Bool {
+        if ProcessInfo.processInfo.environment["BRIGLIA_PATH_FRONT"] != nil { return false }
+        if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BREW_INSTALLER") == nil, RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BASE_DIRS") != nil { return false }
+        let terminal = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_INTERACTIVE").map { $0 == "1" } ?? (isatty(STDIN_FILENO) == 1)
+        return terminal && homebrewAvailable()
+    }
+
+    /// One attempt per process (Codex plan review r1, Q5): claimed atomically
+    /// right before brew starts, never by a skipped or ineligible call. The
+    /// explanation of a failed attempt is kept for the later calls of the
+    /// same process (the setup wizard calls `converge` once per missing
+    /// Python package); a new process may try again.
+    private static let homebrewAttemptLock = NSLock()
+    nonisolated(unsafe) private static var homebrewAttemptClaimed = false
+    nonisolated(unsafe) private static var homebrewAttemptFailureText: String?
+
+    static func claimHomebrewAttempt() -> Bool {
+        homebrewAttemptLock.lock(); defer { homebrewAttemptLock.unlock() }
+        if homebrewAttemptClaimed { return false }
+        homebrewAttemptClaimed = true
+        return true
+    }
+
+    static var homebrewAttemptFailure: String? {
+        homebrewAttemptLock.lock(); defer { homebrewAttemptLock.unlock() }
+        return homebrewAttemptFailureText
+    }
+
+    static func recordHomebrewAttemptFailure(_ why: String) {
+        homebrewAttemptLock.lock(); defer { homebrewAttemptLock.unlock() }
+        homebrewAttemptFailureText = why
+    }
+
+    /// Selftests only: a fresh process's state.
+    static func resetHomebrewAttemptForTesting() {
+        homebrewAttemptLock.lock(); defer { homebrewAttemptLock.unlock() }
+        homebrewAttemptClaimed = false
+        homebrewAttemptFailureText = nil
+    }
+
+    /// The claimed attempt (`converge(.install)` from a terminal, the setup
+    /// wizard's bootstrap): nil when brew succeeded, else the explanation with
+    /// the exact commands, also kept for this process's later calls.
+    static func installHomebrewPythonOnce(progress: (String) -> Void) async -> String? {
+        let formula = homebrewPythonFormula
+        progress("No Python 3.\(effectiveMinimumMinor)–3.\(effectiveMaximumMinor) found: installing Homebrew's \(formula) (a few minutes)…")
+        guard let failure = await installHomebrewPython(formula) else { return nil }
+        let why = "could not install \(formula) with Homebrew (\(failure)): run `brew install \(formula)`, then `briglia python-env install`"
+        recordHomebrewAttemptFailure(why)
+        return why
+    }
+
+    /// `brew install <formula>`, output captured, stdin /dev/null. nil = done.
+    /// The installer is chosen here, apart from the eligibility checks: a
+    /// selftest (base-dir seam) only ever runs the fake one.
+    static func installHomebrewPython(_ formula: String) async -> String? {
+        if let fake = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BREW_INSTALLER") {
+            let r = await RuntimeProcess.run(fake, ["install", formula],
+                                             env: ["PATH": "/usr/bin:/bin"].merging(homebrewInstallEnvironment) { $1 }, timeout: 120)
+            return r.status == 0 ? nil : RuntimeProcess.detail(r)
+        }
+        if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BASE_DIRS") != nil { return "selftest without a fake Homebrew: nothing run" }
+        // Selftests point the "real" path at a logging stub too, so even a
+        // deliberately broken guard above cannot reach the real Homebrew.
+        guard let brew = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_REAL_BREW") ?? ToolchainService.brewPath() else { return "Homebrew not found" }
+        let env = ProcessInfo.processInfo.environment.merging(homebrewInstallEnvironment) { $1 }
+        let r = await RuntimeProcess.run(brew, ["install", formula], env: env, timeout: 1800)
+        return r.status == 0 ? nil : RuntimeProcess.detail(r)
+    }
+
+    /// Homebrew installed the formula but did not link `python3.X` into
+    /// <prefix>/bin, where selection looks (Briglia never links): say so.
+    static func homebrewKegHint() -> String {
+        let formula = homebrewPythonFormula, name = "python3.\(effectiveMaximumMinor)"
+        let prefixes: [String]
+        if let p = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BREW_PREFIX") { prefixes = [p] }
+        else if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BASE_DIRS") != nil { return "" }   // selftests: only the fake prefix
+        else { prefixes = ["/opt/homebrew", "/usr/local"] }
+        let fm = FileManager.default
+        for p in prefixes where fm.isExecutableFile(atPath: "\(p)/opt/\(formula)/bin/\(name)") && !fm.fileExists(atPath: "\(p)/bin/\(name)") {
+            return "; Homebrew's \(formula) is installed but not linked: run `brew link \(formula)`"
+        }
+        return ""
+    }
+    #endif
 
     // MARK: Spec
 
@@ -576,6 +707,28 @@ enum PythonRuntime {
             }
             selection = await selectBase()
         }
+        #if os(macOS)
+        // No usable Python 3.11–3.<max> anywhere Briglia scans (owner,
+        // 2026-11-10): an install the user started from a terminal (the setup
+        // wizard, `briglia python-env install`) installs Homebrew's
+        // python@3.<max> once per process and looks again — never at
+        // startup, never without a terminal, never from the agent's shell.
+        if selection.base == nil, trigger == .install {
+            if canInstallPythonInteractively(), claimHomebrewAttempt() {
+                if let why = await installHomebrewPythonOnce(progress: progress ?? { print("  \($0)") }) { return .unavailable(why) }
+                selection = await selectBase()
+                if selection.base == nil {
+                    let detail = selection.reasons.isEmpty ? "" : " (\(selection.reasons.joined(separator: "; ")))"
+                    let why = "Homebrew installed \(homebrewPythonFormula), but still no usable Python 3.\(effectiveMinimumMinor)–3.\(effectiveMaximumMinor)"
+                        + homebrewKegHint() + detail
+                    recordHomebrewAttemptFailure(why)
+                    return .unavailable(why)
+                }
+            } else if let earlier = homebrewAttemptFailure {
+                return .unavailable(earlier)
+            }
+        }
+        #endif
         guard let base = selection.base else { return .unavailable(unavailableMessage(selection)) }
         guard let pin = pin(base: base) else { return .unavailable("the Python lock is missing from the resource bundle") }
         let spec = spec(base: base, pin: pin)

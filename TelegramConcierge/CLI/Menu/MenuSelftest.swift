@@ -59,6 +59,9 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.namedServers()
         await t.round5()
         await t.openRouterDefault()
+        #if os(macOS)
+        await t.pythonBootstrap()
+        #endif
         print(t.failures == 0 ? "\nmenu selftest: all \(t.checks) checks passed"
                               : "\nmenu selftest: \(t.failures) of \(t.checks) FAILED")
         return t.failures

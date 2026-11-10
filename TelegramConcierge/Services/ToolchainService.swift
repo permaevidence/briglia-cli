@@ -156,6 +156,9 @@ enum ToolchainService {
 
     /// Absolute path to the python3 the agent's bash tool would resolve.
     static func python3Path() -> String? {
+        #if os(macOS)
+        return macPython3Path()
+        #else
         let result = ProcessRunner.runBlockingProcess(
             executable: "/usr/bin/which", args: ["python3"], timeoutSeconds: 5
         )
@@ -164,7 +167,39 @@ enum ToolchainService {
             return nil
         }
         return out
+        #endif
     }
+
+    #if os(macOS)
+    /// macOS (owner, 2026-11-10; Codex plan review r1): the python3 the
+    /// agent's bash tool resolves when it is a working Python 3, else the
+    /// first working one Briglia scans (python3, python3.14…python3.11 in
+    /// PATH, /opt/homebrew/bin, /usr/local/bin, /usr/bin). Homebrew's
+    /// python@3.X has only versioned names, and a broken python3 first on
+    /// PATH must not blind the tools check. nil = no working Python 3 at all.
+    static func macPython3Path() -> String? {
+        let which = ProcessRunner.runBlockingProcess(executable: "/usr/bin/which", args: ["python3"], timeoutSeconds: 5)
+        let first = which.stdout?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return firstWorkingPython((first.isEmpty ? [] : [first]) + PythonRuntime.baseCandidates(), works: runsPython3)
+    }
+
+    /// The first executable candidate (each tried once) that `works`.
+    static func firstWorkingPython(_ candidates: [String], works: (String) -> Bool) -> String? {
+        var tried = Set<String>()
+        for c in candidates where tried.insert(c).inserted && FileManager.default.isExecutableFile(atPath: c) {
+            if works(c) { return c }
+        }
+        return nil
+    }
+
+    /// Runs and reports Python 3 (Apple's 3.9 is fine: the tools check is
+    /// stdlib only).
+    static func runsPython3(_ path: String) -> Bool {
+        let r = RuntimeProcess.runBlocking(path, ["-c", "import sys; print(sys.version_info[0])"],
+                                           env: ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()], cwd: nil, timeout: 20)
+        return r.status == 0 && r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "3"
+    }
+    #endif
 
     /// Whether plain `pip install` works (PEP 668 check), probed the same way
     /// pip itself decides: the EXTERNALLY-MANAGED marker file next to stdlib.
@@ -290,7 +325,7 @@ enum ToolchainService {
             }
             return linuxInstall(LinuxPackageMap.package(spec.package, manager: manager.name), manager: manager)
             #else
-            guard let brew = brewPath() else { return "Homebrew non trovato" }
+            guard let brew = brewPath() else { return "Homebrew not found: install it from https://brew.sh" }
             let args = spec.manager == "brewCask"
                 ? ["install", "--cask", spec.package]
                 : ["install", spec.package]
@@ -312,7 +347,7 @@ enum ToolchainService {
         }
         return linuxInstall(LinuxPackageMap.package("libreoffice", manager: manager.name), manager: manager)
         #else
-        guard let brew = brewPath() else { return "Homebrew non trovato" }
+        guard let brew = brewPath() else { return "Homebrew not found: install it from https://brew.sh" }
         let result = await ProcessRunner.runProcessAsync(
             executable: brew, args: ["install", "--cask", "libreoffice"], timeoutSeconds: 2400
         )

@@ -1216,10 +1216,15 @@ final class MenuWorkflow {
             return L("This asks for your password in the terminal. Press Stop, then open briglia menu again to do it.",
                      "Questo chiede la password nel terminale. Premi Ferma, poi riapri briglia menu per farlo.")
         case "tools_install":
+            #if os(Linux)
             if let status = toolchain, env.quick.toolchainJobs(status).contains(where: { $0.mode == .terminalHandoff }) {
                 return L("Installing these asks for your password in the terminal. Press Stop, then open briglia menu again to install them.",
                          "L\u{2019}installazione chiede la password nel terminale. Premi Ferma, poi riapri briglia menu per installarli.")
             }
+            #endif
+            // macOS: every tools job is detached (brew asks for no password),
+            // so the planner — which probes for a usable Python — runs once,
+            // in installTools (Codex plan review r1, Q3).
             return nil
         default:
             return nil
@@ -2223,6 +2228,16 @@ final class MenuWorkflow {
             }
             self.jobLabel = ""
             let after = await self.env.toolchainStatus()
+            #if os(macOS)
+            // Python bootstrap (owner, 2026-11-10; Codex plan review r1): the
+            // tools check could not run before this install (no working
+            // Python 3); now it can, so install what it reports — once, in
+            // the same run.
+            if failure == nil, !status.doctorRan, after.doctorRan, !after.complete {
+                await self.installToolsAfterPythonBootstrap(after, checkpoint)
+                return
+            }
+            #endif
             self.toolchain = after
             self.busy = nil
             if let failure { self.toolsError = self.L("Installation stopped \u{2014} \(failure).", "Installazione interrotta: \(failure).") }
@@ -2232,6 +2247,33 @@ final class MenuWorkflow {
         pending.append(t)
         return (true, nil)
     }
+
+    #if os(macOS)
+    /// The second (last) round of a tools install that began with Homebrew's
+    /// Python: the jobs the tools check now plans, then the usual outcome.
+    private func installToolsAfterPythonBootstrap(_ status: ToolchainService.DesktopStatus, _ checkpoint: @escaping @Sendable () throws -> Void) async {
+        let jobs = env.quick.toolchainJobs(status)
+        var failure: String?
+        for (index, job) in jobs.enumerated() {
+            if (try? checkpoint()) == nil || Task.isCancelled { failure = L("stopped", "interrotta"); break }
+            jobLabel = L("Step \(index + 1) of \(jobs.count): \(job.label)", "Passo \(index + 1) di \(jobs.count): \(job.label)")
+            appendJobLine("\u{25B6} \(job.label)")
+            let r = await runner.run(job)
+            if !r.ok {
+                failure = "\(job.label): \(r.failureReason ?? "failed")"
+                for line in r.excerpt { appendJobLine(line) }
+                break
+            }
+        }
+        jobLabel = ""
+        let after = await env.toolchainStatus()
+        toolchain = after
+        busy = nil
+        if let failure { toolsError = L("Installation stopped \u{2014} \(failure).", "Installazione interrotta: \(failure).") }
+        else if !after.complete { toolsError = L("Still missing: ", "Mancano ancora: ") + missingTools(after).joined(separator: ", ") + "." }
+        markCompleteIfReady()
+    }
+    #endif
 
     func appendJobLine(_ line: String) {
         let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)

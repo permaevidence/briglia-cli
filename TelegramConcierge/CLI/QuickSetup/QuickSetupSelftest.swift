@@ -70,6 +70,9 @@ struct QuickSetupSelftest: AsyncParsableCommand {
         await t.section("2c. AgentMail pinned release") { try await t.agentMailPinning() }
         await t.section("17. service start (socket wait)") { try await t.serviceStart() }
         await t.section("18. python venv package in the menu's apt job") { try await t.venvAptJob() }
+        #if os(macOS)
+        await t.section("18b. Homebrew python in the menu's tools jobs (macOS)") { try await t.brewPythonJob() }
+        #endif
         await t.section("19. terminal quick setup") { try await t.terminalQuickSetup() }
 
         print(t.failures == 0 ? "\nquicksetup selftest: all \(t.checks) checks passed"

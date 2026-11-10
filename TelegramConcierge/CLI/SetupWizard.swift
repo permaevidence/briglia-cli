@@ -914,6 +914,9 @@ struct SetupWizard {
             print("  Skipped.")
             return
         }
+        #if os(macOS)
+        await offerPythonBootstrap()
+        #endif
         guard let report = ToolchainService.runDoctor() else {
             #if os(macOS)
             print("  ⚠ python3 not found — install Xcode Command Line Tools or Homebrew python first.")
@@ -946,6 +949,30 @@ struct SetupWizard {
             }
         }
     }
+
+    #if os(macOS)
+    /// The formula to offer before the tools check (owner, 2026-11-10; Codex
+    /// plan review r1): the check itself needs a working Python 3 and there
+    /// is none anywhere, no usable 3.11–3.<max> either, and Homebrew can
+    /// install one from this terminal. nil = nothing to offer.
+    nonisolated static func pythonBootstrapOffer(workingPython: String?, canInstall: Bool, formulaNeeded: () -> String?) -> String? {
+        guard workingPython == nil, canInstall else { return nil }
+        return formulaNeeded()
+    }
+
+    private func offerPythonBootstrap() async {
+        guard let formula = Self.pythonBootstrapOffer(workingPython: ToolchainService.python3Path(),
+                                                     canInstall: PythonRuntime.canInstallPythonInteractively(),
+                                                     formulaNeeded: { PythonRuntime.homebrewPythonFormulaNeededBlocking() }),
+              WizardIO.askYesNo("No working Python 3 was found, and the tools check needs one. Install Homebrew's \(formula) now?", default: true),
+              PythonRuntime.claimHomebrewAttempt() else { return }
+        if let why = await PythonRuntime.installHomebrewPythonOnce(progress: { print("  \($0)") }) {
+            print("  ✖ \(why)")
+        } else {
+            print("  ✔ \(formula) installed")
+        }
+    }
+    #endif
 
     /// Optional email + calendar: AgentMail (dedicated agent inbox + Briglia's
     /// local calendar) or none (the default — no email/calendar context,

@@ -129,6 +129,17 @@ struct QuickSetupEnvironment {
 
     /// Seam: the python3.X-venv package the menu must install (selftests).
     nonisolated(unsafe) static var venvPackageNeeded: () -> String? = { PythonRuntime.venvPackageNeededBlocking() }
+    #if os(macOS)
+    /// Seam: the Homebrew Python formula the tools install adds first (selftests).
+    nonisolated(unsafe) static var pythonFormulaNeeded: () -> String? = { PythonRuntime.homebrewPythonFormulaNeededBlocking() }
+
+    /// `brew install python@3.<max>`: detached (no password), the same
+    /// environment as the interactive install (PythonRuntime).
+    static func pythonFormulaJob(brew: String, formula: String) -> SetupJobRunner.Spec {
+        .init(row: "toolchain", command: [brew, "install", formula], mode: .detached, timeout: 1800,
+              environment: PythonRuntime.homebrewInstallEnvironment, label: "brew install \(formula)")
+    }
+    #endif
 
     static func defaultToolchainJobs(_ status: ToolchainService.DesktopStatus) -> [SetupJobRunner.Spec] {
         var jobs: [SetupJobRunner.Spec] = []
@@ -140,6 +151,13 @@ struct QuickSetupEnvironment {
                                                mode: .detached, timeout: 3600, label: "briglia python-env install")
         #if os(macOS)
         guard let brew = ToolchainService.brewPath() else { return [] }
+        // The tools check could not run at all (no working Python 3 anywhere)
+        // and no usable 3.11–3.<max>: Homebrew's python@3.<max> first; the
+        // menu checks again and installs what it then reports, in the same
+        // run (MenuWorkflow.installTools; Codex plan review r1).
+        if !status.doctorRan, let formula = pythonFormulaNeeded() {
+            jobs.append(pythonFormulaJob(brew: brew, formula: formula))
+        }
         var formulas: [String] = []
         if !missing.isDisjoint(with: ["pdfinfo", "pdftotext", "pdftoppm", "pdfseparate", "pdfunite"]) { formulas.append("poppler") }
         if !missing.isDisjoint(with: ["ffmpeg", "ffprobe"]) { formulas.append("ffmpeg") }
@@ -148,7 +166,14 @@ struct QuickSetupEnvironment {
             jobs.append(.init(row: "toolchain", command: [brew, "install", f], mode: .detached, timeout: 900,
                               environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], label: "brew install \(f)"))
         }
-        if !pipPackages.isEmpty { jobs.append(pythonEnvJob) }
+        if !pipPackages.isEmpty {
+            // No usable Python 3.11–3.<max> anywhere Briglia scans (Apple's
+            // 3.9 only, only a newer one, none): Homebrew's python@3.<max>
+            // first, as its own job, before the python-env job needs it
+            // (owner, 2026-11-10). Never when one exists.
+            if let formula = pythonFormulaNeeded() { jobs.append(pythonFormulaJob(brew: brew, formula: formula)) }
+            jobs.append(pythonEnvJob)
+        }
         if !status.libreOffice {
             jobs.append(.init(row: "toolchain", command: [brew, "install", "--cask", "libreoffice"], mode: .detached, timeout: 2400,
                               environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], label: "brew install --cask libreoffice"))

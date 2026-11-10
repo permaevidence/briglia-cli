@@ -152,3 +152,48 @@ extension SelftestContext {
         #endif
     }
 }
+
+#if os(macOS)
+/// Section 18b (owner, 2026-11-10): on macOS, with no usable Python
+/// 3.11–3.<max>, the tools install adds Homebrew's python@3.<max> as its own
+/// detached job right before the python-env job; when the tools check could
+/// not run at all, that job comes first and alone. Job specs only: no brew
+/// is ever run here.
+extension SelftestContext {
+    func brewPythonJob() async throws {
+        guard ToolchainService.brewPath() != nil else { check("Homebrew on this runner (rows skipped otherwise)", true); return }
+        let saved = QuickSetupEnvironment.pythonFormulaNeeded
+        defer { QuickSetupEnvironment.pythonFormulaNeeded = saved }
+        var asked = 0
+        let formula = PythonRuntime.homebrewPythonFormula
+        QuickSetupEnvironment.pythonFormulaNeeded = { asked += 1; return formula }
+        func status(_ missing: [String], libre: Bool = true, ran: Bool = true) -> ToolchainService.DesktopStatus {
+            .init(doctorRan: ran, missing: missing, libreOffice: libre, mandatoryMissing: missing)
+        }
+        let onlyPy = QuickSetupEnvironment.defaultToolchainJobs(status(["python-docx"]))
+        let py = onlyPy.first { $0.label == "brew install \(formula)" }
+        check("no usable Python → a detached `brew install \(formula)` job (no update, upgrade, dependents or cleanup)",
+              py?.mode == .detached && py?.command.suffix(2) == ["install", formula] && py?.timeout == 1800
+              && py?.environment == ["HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_INSTALL_UPGRADE": "1",
+                                     "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1"],
+              "\(onlyPy.map(\.command)) \(String(describing: py?.environment))")
+        check("…right before the python-env job", onlyPy.map(\.label) == ["brew install \(formula)", "briglia python-env install"], "\(onlyPy.map(\.label))")
+        let mixed = QuickSetupEnvironment.defaultToolchainJobs(status(["python-docx", "ffmpeg"], libre: false))
+        check("with other tools → ffmpeg, then \(formula), then python-env, then LibreOffice",
+              mixed.map(\.label) == ["brew install ffmpeg", "brew install \(formula)", "briglia python-env install", "brew install --cask libreoffice"],
+              "\(mixed.map(\.label))")
+        asked = 0
+        let noPy = QuickSetupEnvironment.defaultToolchainJobs(status(["ffmpeg"]))
+        check("no Python package missing → the Python check is not even run, no Python job",
+              asked == 0 && noPy.map(\.label) == ["brew install ffmpeg"], "asked=\(asked) \(noPy.map(\.label))")
+        let boot = QuickSetupEnvironment.defaultToolchainJobs(status([], ran: false))
+        check("the tools check could not run + no usable Python → Homebrew's \(formula) first, alone (the menu re-checks)",
+              boot.map(\.label) == ["brew install \(formula)"], "\(boot.map(\.label))")
+        QuickSetupEnvironment.pythonFormulaNeeded = { nil }
+        let fine = QuickSetupEnvironment.defaultToolchainJobs(status(["python-docx"]))
+        check("a usable Python → no brew Python job, only python-env", fine.map(\.label) == ["briglia python-env install"], "\(fine.map(\.label))")
+        let bootNone = QuickSetupEnvironment.defaultToolchainJobs(status([], ran: false))
+        check("the tools check could not run but a usable Python exists → no Python job (as before)", bootNone.isEmpty, "\(bootNone.map(\.label))")
+    }
+}
+#endif
