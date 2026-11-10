@@ -225,6 +225,18 @@ extension RuntimeHarness {
               W.pythonBootstrapOffer(workingPython: "/usr/bin/python3", canInstall: true, formulaNeeded: { formula }) == nil)
         check("wizard: no terminal or no Homebrew → no offer", W.pythonBootstrapOffer(workingPython: nil, canInstall: false, formulaNeeded: { formula }) == nil)
         check("wizard: a usable Python → no offer", W.pythonBootstrapOffer(workingPython: nil, canInstall: true, formulaNeeded: { nil }) == nil)
+        R.resetHomebrewAttemptForTesting()
+        let failLines = await W.pythonBootstrapLines(formula: formula, install: { "could not install \(formula) with Homebrew (exit 1)" },
+                                                     workingPythonAfter: { nil }, kegHint: { "" })
+        check("wizard bootstrap: brew fails → its explanation", failLines == ["  ✖ could not install \(formula) with Homebrew (exit 1)"], "\(failLines)")
+        let okLines = await W.pythonBootstrapLines(formula: formula, install: { nil }, workingPythonAfter: { "/opt/homebrew/bin/python3.\(maxMinor)" }, kegHint: { "" })
+        check("wizard bootstrap: brew succeeds and Python 3 works → installed", okLines == ["  ✔ \(formula) installed"], "\(okLines)")
+        let hint = "; Homebrew's \(formula) is installed but not linked: run `brew link \(formula)`"
+        let stillLines = await W.pythonBootstrapLines(formula: formula, install: { nil }, workingPythonAfter: { nil }, kegHint: { hint })
+        check("wizard bootstrap: brew succeeds but still no working Python 3 → the precise reason with the link hint, kept for later calls",
+              stillLines.count == 1 && stillLines[0].hasPrefix("  ✖ Homebrew installed \(formula), but still no working Python 3 for the tools check" + hint)
+              && R.homebrewAttemptFailure.map { stillLines[0].hasSuffix($0) } == true, "\(stillLines) \(R.homebrewAttemptFailure ?? "nil")")
+        R.resetHomebrewAttemptForTesting()
         check("brew: the real Homebrew was never reached in this section", brewLog(realBrew).isEmpty, "\(brewLog(realBrew))")
     }
 

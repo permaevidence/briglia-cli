@@ -2208,6 +2208,11 @@ final class MenuWorkflow {
             if !env.isLinux { return (false, L("Homebrew is needed to install these tools. Install it from https://brew.sh, then choose Check again.", "Per installare questi strumenti serve Homebrew. Installalo da https://brew.sh, poi scegli Ricontrolla.")) }
             return (false, L("No package installer was found on this system for: ", "Su questo sistema non c\u{2019}è un gestore di pacchetti per: ") + status.mandatoryMissing.joined(separator: ", ") + ".")
         }
+        #if os(macOS)
+        // This install starts with Homebrew's Python because the tools check
+        // could not run (QuickSetupEnvironment.defaultToolchainJobs).
+        let pythonBootstrap = !status.doctorRan && jobs.contains { $0.command.last == PythonRuntime.homebrewPythonFormula }
+        #endif
         busy = "tools"
         jobLines = []
         toolsError = nil
@@ -2235,6 +2240,17 @@ final class MenuWorkflow {
             // the same run.
             if failure == nil, !status.doctorRan, after.doctorRan, !after.complete {
                 await self.installToolsAfterPythonBootstrap(after, checkpoint)
+                return
+            }
+            if failure == nil, pythonBootstrap, !after.doctorRan {
+                // brew said yes, yet no working Python 3 appeared (e.g. not
+                // linked): say so instead of an empty "Still missing".
+                let f = PythonRuntime.homebrewPythonFormula
+                self.toolchain = after
+                self.busy = nil
+                self.toolsError = self.L("Homebrew installed \(f), but the tools check still can\u{2019}t run Python. If Homebrew says it isn\u{2019}t linked, run brew link \(f) in the terminal, then choose Check again.",
+                                         "Homebrew ha installato \(f), ma il controllo degli strumenti non riesce ancora a usare Python. Se Homebrew dice che non è collegato, esegui brew link \(f) nel terminale, poi scegli Ricontrolla.")
+                self.markCompleteIfReady()
                 return
             }
             #endif

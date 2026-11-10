@@ -919,7 +919,10 @@ struct SetupWizard {
         #endif
         guard let report = ToolchainService.runDoctor() else {
             #if os(macOS)
-            print("  ⚠ python3 not found — install Xcode Command Line Tools or Homebrew python first.")
+            // A failed Python bootstrap already printed its precise reason.
+            if PythonRuntime.homebrewAttemptFailure == nil {
+                print("  ⚠ python3 not found — install Xcode Command Line Tools or Homebrew python first.")
+            }
             #else
             print("  ⚠ python3 not found — install it first, e.g. sudo apt install python3 python3-pip.")
             #endif
@@ -960,17 +963,32 @@ struct SetupWizard {
         return formulaNeeded()
     }
 
+    /// What the bootstrap reports once the user said yes and the attempt is
+    /// claimed (pure apart from the closures; Codex plan review r2 note 1): a
+    /// failed brew gives its explanation; brew succeeding while no working
+    /// Python 3 appears gives the precise reason (with the not-linked hint),
+    /// also kept for this process's later calls.
+    nonisolated static func pythonBootstrapLines(formula: String, install: () async -> String?,
+                                                 workingPythonAfter: () -> String?, kegHint: () -> String) async -> [String] {
+        if let why = await install() { return ["  ✖ \(why)"] }
+        if workingPythonAfter() != nil { return ["  ✔ \(formula) installed"] }
+        let why = "Homebrew installed \(formula), but still no working Python 3 for the tools check" + kegHint()
+            + " — fix that, then run the toolchain step again"
+        PythonRuntime.recordHomebrewAttemptFailure(why)
+        return ["  ✖ \(why)"]
+    }
+
     private func offerPythonBootstrap() async {
         guard let formula = Self.pythonBootstrapOffer(workingPython: ToolchainService.python3Path(),
                                                      canInstall: PythonRuntime.canInstallPythonInteractively(),
                                                      formulaNeeded: { PythonRuntime.homebrewPythonFormulaNeededBlocking() }),
               WizardIO.askYesNo("No working Python 3 was found, and the tools check needs one. Install Homebrew's \(formula) now?", default: true),
               PythonRuntime.claimHomebrewAttempt() else { return }
-        if let why = await PythonRuntime.installHomebrewPythonOnce(progress: { print("  \($0)") }) {
-            print("  ✖ \(why)")
-        } else {
-            print("  ✔ \(formula) installed")
-        }
+        let lines = await Self.pythonBootstrapLines(formula: formula,
+                                                    install: { await PythonRuntime.installHomebrewPythonOnce(progress: { print("  \($0)") }) },
+                                                    workingPythonAfter: { ToolchainService.python3Path() },
+                                                    kegHint: { PythonRuntime.homebrewKegHint() })
+        for line in lines { print(line) }
     }
     #endif
 

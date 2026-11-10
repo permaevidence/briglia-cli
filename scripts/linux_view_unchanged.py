@@ -2,7 +2,11 @@
 """Linux view unchanged (owner scope, 2026-11-10): a macOS-only change must
 leave every Swift file exactly as a Linux build sees it.
 
-The Linux view of a Swift file keeps what a Linux build compiles:
+A source-comparison heuristic, not a compiler (Codex plan review r2): it is
+line-based, so `#if`/`//` text inside a multiline string literal would be
+taken for a directive or a comment. Linux CI on the release candidate stays
+the authority. The Linux view of a Swift file approximates what a Linux build
+compiles:
   * `#if / #elseif / #else / #endif` chains whose conditions use only
     os(...), canImport(...), true/false with !, &&, || and parentheses are
     evaluated for Linux (os(Linux), canImport(Glibc) and
