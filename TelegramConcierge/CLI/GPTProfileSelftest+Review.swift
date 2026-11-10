@@ -255,6 +255,21 @@ extension GPTProfileSelftest {
                     isHeld && queued && returnedWhileHeld && rb.first?.editOutcome?.category == .cancelled && t.read(d + "/b.txt") == "old\n"
                     && ra.first?.editOutcome?.status == .applied && t.read(d + "/a.txt") == "new\n",
                     "held \(isHeld) queued \(queued) returned \(returnedWhileHeld) b \(rb.first?.content ?? "nil")")
+            // Codex round 1, finding 2: a lock waiter is "not started" like a
+            // round waiter — in the settled record, in the interrupted-round
+            // replay and in the returned result.
+            let scope = await second.gptSettlementScope
+            let settledB = await GPTPatchSettlement.shared.settle(scope: scope, callIDs: ["z7db"])
+            let replay = GPTPatchSettlement.interruptedRound(
+                AssistantToolCallMessage(content: "", toolCalls: [patchCall("z7db", pb)]),
+                settled: settledB, placeholder: "unknown")
+            let replayed = replay?.results.first
+            t.check("Z.7e …and it is recorded as not started (typed not_executed, the not-started text), returned and replayed",
+                    settledB["z7db"]?.notStarted == true && settledB["z7db"]?.text == GPTPatchSettlement.notStartedText
+                    && replayed?.outcomeBinding?.kind == .notExecuted && replayed?.content == GPTPatchSettlement.notStartedText
+                    && rb.first?.outcomeBinding?.kind == .notExecuted && rb.first?.content == GPTPatchSettlement.notStartedText,
+                    "notStarted=\(String(describing: settledB["z7db"]?.notStarted)) binding=\(String(describing: replayed?.outcomeBinding?.kind)) "
+                    + "returned=\(String(describing: rb.first?.outcomeBinding?.kind)) text=\(settledB["z7db"]?.text ?? "nil")")
         }
         // FIFO: the order of arrival is the order of the lock.
         let first = GPTPatchSerializer.Ticket()
@@ -354,5 +369,48 @@ extension GPTProfileSelftest {
         t.check("Z.10e after read_file (not redacted) the rewrite with the real text is allowed",
                 rr.editOutcome?.status == .applied && t.read(env) == "API_URL=https://y.example\nDEMO_TOKEN=\(secret)\n", rr.content)
         t.check("Z.10f the GPT bash note warns about placeholders", AvailableTools.gptReadNote.contains("[REDACTED:…]") && AvailableTools.gptReadNote.contains("never copy one into a patch"))
+        await aliasRedactionTests(t, executor: executor, dir: proj, secret: secret)
+    }
+
+    /// Codex round 1, finding 1: bash merges a command's `service_key_env`
+    /// aliases into its redactor, so its output can name the secret by an
+    /// alias (equal values under two labels: either may win). That placeholder
+    /// earns no receipt and is refused in Add and Update, also later, after a
+    /// plain read of the destination. Needs the DEMO_TOKEN key of
+    /// `redactionTests` (label "Demo Token").
+    static func aliasRedactionTests(_ t: CPTest, executor: ToolExecutor, dir: String, secret: String) async {
+        defer { BashTools.RedactionAliases.shared.resetForTesting() }
+        let file = dir + "/alias.env"
+        let original = "URL=old\nTOKEN=\(secret)\n"
+        t.write(file, original)
+        var seen: (placeholder: String, result: ToolResultMessage)? = nil
+        for i in 0..<24 where seen == nil {
+            await FileTimeTracker.shared.resetGPTForTesting()
+            let alias = "Z10_ALIAS_\(i)"
+            let r = await exec(executor, call("bash", ["command": "cat \(file)", "service_key_env": [alias: "Demo Token"]], editing: .gptJSON))
+            if r.content.contains("[REDACTED:\(alias)]") { seen = ("[REDACTED:\(alias)]", r) }
+        }
+        let known = EditProtections.currentRedactionPlaceholders()
+        t.check("Z.10g a service_key_env alias's placeholder, as bash shows it, earns no receipt and is a current placeholder",
+                seen != nil && seen?.result.gptEvidence == nil && known.contains(seen?.placeholder ?? "-")
+                && known.contains("[REDACTED:Z10_ALIAS_0]"),
+                seen?.result.content ?? "no alias placeholder in 24 tries")
+        guard let seen else { return }
+        await GPTEvidenceSettlement.publish([seen.result])
+        let add = "*** Begin Patch\n*** Add File: \(file)\n+URL=new\n+TOKEN=\(seen.placeholder)\n*** End Patch"
+        let ar = await exec(executor, call("apply_patch", ["input": add], editing: .gptJSON))
+        t.check("Z.10h an Add carrying the alias placeholder is refused; the real key stays",
+                ar.editOutcome?.category == .protected && t.read(file) == original, ar.content)
+        let update = "*** Begin Patch\n*** Update File: \(file)\n@@\n URL=old\n+BACKUP=\(seen.placeholder)\n*** End Patch"
+        let ur = await exec(executor, call("apply_patch", ["input": update], editing: .gptJSON))
+        t.check("Z.10i an Update adding the alias placeholder is refused",
+                ur.editOutcome?.category == .protected && t.read(file) == original, ur.content)
+        // A real receipt for the destination later (read_file is not
+        // redacted): the alias placeholder is still refused.
+        let read = await exec(executor, call("read_file", ["path": file], editing: .gptJSON))
+        await GPTEvidenceSettlement.publish([read])
+        let later = await exec(executor, call("apply_patch", ["input": add], editing: .gptJSON))
+        t.check("Z.10j …and still refused after a plain read of the destination",
+                later.editOutcome?.category == .protected && t.read(file) == original, later.content)
     }
 }

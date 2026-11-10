@@ -53,13 +53,16 @@ final class GPTPatchSettlement: @unchecked Sendable {
     struct Settled: Equatable {
         let text: String
         let outcome: CodexPatch.EditOutcome
-        /// Pre-release review B1: the patch never started (it was queued
-        /// behind an earlier patch of its round when the run was stopped).
+        /// Pre-release review B1: the patch never started (the run was
+        /// stopped while it waited behind an earlier patch of its round, or
+        /// for the process-wide patch lock).
         var notStarted = false
     }
 
-    /// The result of a GPT patch that never started (pre-release review B1).
-    static let notStartedText = "apply_patch did not run: the request was stopped before this patch's turn came (the patches of one response run one after another). No file was changed."
+    /// The result of a GPT patch that never started (pre-release review B1):
+    /// stopped while it waited for its round turn or for the process-wide
+    /// patch lock.
+    static let notStartedText = "apply_patch did not run: the request was stopped while this patch was waiting for its turn (patches run one at a time). No file was changed."
 
     /// Completed scopes kept for late consumers (a stopped run's completion
     /// notice); entries of a scope with a running call are never dropped.
@@ -414,6 +417,7 @@ extension ToolExecutor {
         var result = ToolResultMessage(toolCallId: call.id, content: applied.text)
         result.editOutcome = applied.outcome
         result.gptEvidence = applied.evidence
+        if applied.notStarted { result.outcomeBinding = OutcomeBinding(kind: .notExecuted) }
         StageMarkers.exit(token, applied.outcome.status == CodexPatch.EditOutcome.Status.applied ? StageMarkers.Outcome.ok : StageMarkers.Outcome.error)
         return result
     }
@@ -422,6 +426,9 @@ extension ToolExecutor {
         var text: String
         var outcome: CodexPatch.EditOutcome
         var evidence: GPTEvidenceSettlement
+        /// Stopped while waiting for the process-wide patch lock: the engine
+        /// never ran (Codex round 1, finding 2).
+        var notStarted = false
     }
 
     /// Test seam: runs inside the commit worker after the engine returns.
@@ -450,13 +457,18 @@ extension ToolExecutor {
         return await withTaskCancellationHandler {
             let worker = Task<GPTPatchApplied, Never> {
                 if let hook = gptPatchBeforeLockHookForTesting { await hook(callID) }
-                let result: CodexPatch.Result
-                if await GPTPatchSerializer.shared.acquire(ticket) {
-                    result = await CodexPatch.apply(engineRequest)
-                    GPTPatchSerializer.shared.release(ticket)
-                } else {
-                    result = CodexPatch.refused(.cancelled, CodexPatch.cancelledText)
+                guard await GPTPatchSerializer.shared.acquire(ticket) else {
+                    // Stopped while waiting for the lock: the engine never
+                    // ran. The same typed "not started" result as a round
+                    // waiter (Codex round 1, finding 2); no side effects.
+                    let notStarted = GPTPatchSettlement.Settled(text: GPTPatchSettlement.notStartedText,
+                                                                outcome: .refused(.cancelled), notStarted: true)
+                    GPTPatchSettlement.shared.finish(scope: scope, callID: callID, notStarted)
+                    return GPTPatchApplied(text: notStarted.text, outcome: notStarted.outcome,
+                                           evidence: GPTEvidenceSettlement(receipts: []), notStarted: true)
                 }
+                let result = await CodexPatch.apply(engineRequest)
+                GPTPatchSerializer.shared.release(ticket)
                 if let hook = gptPatchWorkerHookForTesting { await hook() }
                 let applied = await recordGPTPatchSideEffects(result, diagnostics: !flag.isSet)
                 GPTPatchSettlement.shared.finish(scope: scope, callID: callID, .init(text: applied.text, outcome: applied.outcome))

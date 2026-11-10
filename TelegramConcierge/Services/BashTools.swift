@@ -1080,14 +1080,55 @@ enum BashTools {
         }
     }
 
+    /// The `service_key_env` aliases this process has resolved (GPT apply_patch
+    /// pre-release review S1, Codex round 1). A command's aliases are merged
+    /// into its redactor, so its output can show `[REDACTED:<alias>]` for a
+    /// service key (equal values under two labels have no fixed tie-break).
+    /// `EditProtections.currentRedactionPlaceholders` includes them, so the
+    /// GPT receipt check and the patch guard recognise a placeholder the model
+    /// saw under an alias for the rest of the process, not only at that
+    /// command's receipt. Labels only, never values; nothing is persisted.
+    final class RedactionAliases: @unchecked Sendable {
+        static let shared = RedactionAliases()
+        /// Bounds a pathological run; the oldest alias leaves first.
+        static let capacity = 4096
+        private let lock = NSLock()
+        private var order: [String] = []
+        private var members: Set<String> = []
+
+        func record<S: Sequence>(_ labels: S) where S.Element == String {
+            lock.lock(); defer { lock.unlock() }
+            for label in labels where !label.isEmpty && members.insert(label).inserted {
+                order.append(label)
+                if order.count > Self.capacity { members.remove(order.removeFirst()) }
+            }
+        }
+
+        var labels: Set<String> {
+            lock.lock(); defer { lock.unlock() }
+            return members
+        }
+
+        func resetForTesting() {
+            lock.lock(); defer { lock.unlock() }
+            order.removeAll()
+            members.removeAll()
+        }
+    }
+
     fileprivate static func redactServiceKeys(in text: String) -> String {
         SecretRedactor().redact(text)
     }
 
-    /// Resolve the agent's `service_key_env` mapping to real secrets.
+    /// Resolve the agent's `service_key_env` mapping to real secrets. Every
+    /// bash path resolves here, before its command runs: the resolved aliases
+    /// are recorded first, since the command's output may name a secret by
+    /// one of them (`RedactionAliases`).
     private static func resolvePerCommandKeys(_ mapping: [String: String]?) -> (resolved: [String: String], missing: [String]) {
         guard let mapping, !mapping.isEmpty else { return ([:], []) }
-        return KeychainHelper.resolveServiceKeyEnv(mapping)
+        let resolution = KeychainHelper.resolveServiceKeyEnv(mapping)
+        RedactionAliases.shared.record(resolution.resolved.keys)
+        return resolution
     }
 
     private static func jsonError(_ message: String) -> String {
