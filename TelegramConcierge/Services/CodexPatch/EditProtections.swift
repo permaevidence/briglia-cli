@@ -32,9 +32,11 @@ enum EditProtections {
     /// this process — `[REDACTED:<label>]` for every label of the live
     /// redaction environment (the Telegram bot token, the ChatGPT sign-in
     /// tokens and the user's service keys) and for every `service_key_env`
-    /// alias a bash command used (Codex round 1: bash merges a command's
-    /// aliases into its redactor). Never the bare `[REDACTED:` prefix: files
-    /// such as Briglia's own sources legitimately contain it.
+    /// alias a bash command used that the process still keeps (Codex round 1:
+    /// bash merges a command's aliases into its redactor; see
+    /// `BashTools.RedactionAliases` for its bound). Never the bare
+    /// `[REDACTED:` prefix: files such as Briglia's own sources legitimately
+    /// contain it.
     static func currentRedactionPlaceholders() -> [String] {
         Set(KeychainHelper.redactionEnvironment().keys)
             .union(BashTools.RedactionAliases.shared.labels)

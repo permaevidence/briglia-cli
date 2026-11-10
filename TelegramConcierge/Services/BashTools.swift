@@ -1086,11 +1086,14 @@ enum BashTools {
     /// service key (equal values under two labels have no fixed tie-break).
     /// `EditProtections.currentRedactionPlaceholders` includes them, so the
     /// GPT receipt check and the patch guard recognise a placeholder the model
-    /// saw under an alias for the rest of the process, not only at that
-    /// command's receipt. Labels only, never values; nothing is persisted.
+    /// saw under an alias while the process keeps that alias, not only at
+    /// that command's receipt. Labels only, never values; nothing is
+    /// persisted, so a restart forgets them (plan §26.2, residuals).
     final class RedactionAliases: @unchecked Sendable {
         static let shared = RedactionAliases()
-        /// Bounds a pathological run; the oldest alias leaves first.
+        /// Bounds a pathological run: past 4,096 distinct aliases the oldest
+        /// leaves first and is no longer recognised (reuse does not refresh
+        /// it; Codex round 2 note, documented in plan §26.2).
         static let capacity = 4096
         private let lock = NSLock()
         private var order: [String] = []
