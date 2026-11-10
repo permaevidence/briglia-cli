@@ -73,7 +73,7 @@ extension CodexPatchSelftest {
                 let fired = HitFlag()
                 CodexPatchTransaction.faultInjector = { p, path in
                     // One-shot (a transient failure): the rollback runs without it.
-                    if !fired.value && p == point && path.hasSuffix(suffix) && !path.contains(".tmp-") { fired.hit(); return true }
+                    if !fired.value && p == point && path.hasSuffix(suffix) && !CodexPatchTransaction.isTempName((path as NSString).lastPathComponent) { fired.hit(); return true }
                     return false
                 }
                 let r = await t.apply(patch)
@@ -141,7 +141,7 @@ extension CodexPatchSelftest {
             let seen = ModeBox()
             CodexPatchTransaction.beforeRevalidateHook = { path in
                 let dir = (path as NSString).deletingLastPathComponent
-                for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where name.contains(".tmp-") {
+                for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where CodexPatchTransaction.isTempName(name) {
                     seen.mode = (try? FileIdentity.lstatPath(dir + "/" + name))??.mode
                 }
             }
@@ -283,7 +283,7 @@ extension CodexPatchSelftest {
                 _ = await t.apply(t.wrap("*** Update File: \(d)/a.txt\n@@\n-a\n+b"))
                 CodexPatchTransaction.faultInjector = nil
             }
-            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter(CodexPatchTransaction.isTempName)
             t.check("T.17 temp files registered before a failing write/chmod/fsync are removed", leftovers.isEmpty && t.read(d + "/a.txt") == "a\n", "\(leftovers)")
         }
         do {
@@ -313,7 +313,7 @@ extension CodexPatchSelftest {
                 CodexPatchTransaction.beforeRollbackHook = nil
                 var leftovers: [String] = []
                 if let e = FileManager.default.enumerator(atPath: d) {
-                    for case let rel as String in e where (rel as NSString).lastPathComponent.contains(".tmp-") { leftovers.append(rel) }
+                    for case let rel as String in e where CodexPatchTransaction.isTempName((rel as NSString).lastPathComponent) { leftovers.append(rel) }
                 }
                 let target = d + suffix
                 let reported = r.outcome.changed.contains(target)
@@ -332,7 +332,7 @@ extension CodexPatchSelftest {
             let r = await t.apply(t.wrap("*** Update File: \(d)/a.txt\n@@\n-old\n+new\n*** Update File: \(d)/b.txt\n@@\n-old\n+new"))
             CodexPatchTransaction.faultInjector = nil
             CodexPatchTransaction.beforeRollbackHook = nil
-            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter(CodexPatchTransaction.isTempName)
             t.check("T.20 Codex's reproduction: partial outcome, a.txt reported still changed, no temp left",
                     leftovers.isEmpty && r.outcome.status == .partial && r.outcome.changed == ["\(d)/a.txt"] && t.read(d + "/b.txt") == "old\n", "\(leftovers) \(r.text)")
         }
@@ -354,7 +354,7 @@ extension CodexPatchSelftest {
         CodexPatchTransaction.faultInjector = nil
         CodexPatchTransaction.beforeRollbackHook = nil
         CodexPatchTransaction.beforeRevalidateHook = nil
-        let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+        let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter(CodexPatchTransaction.isTempName)
         let accounted = leftovers.allSatisfy { r.text.contains($0) }
         t.check("T.21 a temp whose unlink fails during rollback stays accounted for and is named (Codex S1 round 2)",
                 getuid() == 0 || (accounted && r.outcome.status == .partial && r.text.contains("Temporary files that could not be removed or checked") == !leftovers.isEmpty
@@ -385,7 +385,7 @@ extension CodexPatchSelftest {
             CodexPatchTransaction.faultInjector = nil
             CodexPatchTransaction.beforeRollbackHook = nil
             CodexPatchTransaction.beforeRevalidateHook = nil
-            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter(CodexPatchTransaction.isTempName)
             t.check("T.22 \(label): with an unsearchable parent the surviving temp is named, not forgotten (Codex S1 round 3)",
                     getuid() == 0 || (!leftovers.isEmpty && leftovers.allSatisfy { r.text.contains($0) }
                                       && r.text.contains("Temporary files that could not be removed or checked") && r.outcome.status == .partial),

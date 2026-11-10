@@ -355,15 +355,15 @@ extension GPTProfileSelftest {
             if handle { o = ["status": "running", "handle": "bash_1", "stdout": stdout] }
             return String(decoding: (try? JSONSerialization.data(withJSONObject: o)) ?? Data(), as: UTF8.self)
         }
-        t.check("H credited: exit 0 with output", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(0, "a\n")) != nil)
-        t.check("H not credited: exit ≠ 0 (P21)", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(1, "a\n")) == nil)
+        t.check("H credited: exit 0 with output", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(0, "a\n"), placeholders: []) != nil)
+        t.check("H not credited: exit ≠ 0 (P21)", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(1, "a\n"), placeholders: []) == nil)
         t.check("H not credited: empty output from a non-empty file (P48)",
-                GPTShellRead.receipt(path: a, before: before, command: "sed -n '9,10p' \(a)", resultContent: result(0, "")) == nil)
-        t.check("H not credited: moved to the background (handle)", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(0, "a\n", handle: true)) == nil)
-        t.check("H credited: empty file read whole with plain cat", GPTShellRead.receipt(path: d + "/e.txt", before: emptyID, command: "cat \(d)/e.txt", resultContent: result(0, "")) != nil)
-        t.check("H not credited: empty file through head", GPTShellRead.receipt(path: d + "/e.txt", before: emptyID, command: "head -n 1 \(d)/e.txt", resultContent: result(0, "")) == nil)
+                GPTShellRead.receipt(path: a, before: before, command: "sed -n '9,10p' \(a)", resultContent: result(0, ""), placeholders: []) == nil)
+        t.check("H not credited: moved to the background (handle)", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(0, "a\n", handle: true), placeholders: []) == nil)
+        t.check("H credited: empty file read whole with plain cat", GPTShellRead.receipt(path: d + "/e.txt", before: emptyID, command: "cat \(d)/e.txt", resultContent: result(0, ""), placeholders: []) != nil)
+        t.check("H not credited: empty file through head", GPTShellRead.receipt(path: d + "/e.txt", before: emptyID, command: "head -n 1 \(d)/e.txt", resultContent: result(0, ""), placeholders: []) == nil)
         usleep(20_000)
         t.write(a, "changed\n")
-        t.check("H not credited: the file changed during the command", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(0, "a\n")) == nil)
+        t.check("H not credited: the file changed during the command", GPTShellRead.receipt(path: a, before: before, command: "cat \(a)", resultContent: result(0, "a\n"), placeholders: []) == nil)
     }
 }

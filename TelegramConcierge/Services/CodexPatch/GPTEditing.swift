@@ -112,11 +112,16 @@ enum GPTPatchRoute {
     ///   custom call emitted, string output and native/semantic replay
     ///   accepted), only at its pinned endpoint;
     /// - Sign in with ChatGPT (stage 3, probe P2: the same, with the custom
-    ///   tool inside the `briglia` namespace as Briglia sends every tool).
+    ///   tool inside the `briglia` namespace as Briglia sends every tool);
+    /// - the OpenAI API with an API key (pre-release review L2): the same
+    ///   host and endpoint P2 verified, and Codex 4e4767f sends the freeform
+    ///   tool there whatever the auth mode (`create_apply_patch_freeform_tool`
+    ///   for every model with `apply_patch_tool_type`; only its Vertex
+    ///   provider drops it). A refusal still falls back to JSON (§5.6).
     /// Everything else — Chat Completions (including OpenRouter's main
-    /// provider), OpenCode, the OpenAI API and any other custom endpoint —
-    /// sends the JSON form until its own probe passes.
-    static let freeformHosts: Set<String> = ["openrouter.ai"]
+    /// provider), OpenCode and any other custom endpoint — sends the JSON
+    /// form until its own probe passes.
+    static let freeformHosts: Set<String> = ["openrouter.ai", "api.openai.com"]
     /// Selftest seam: a loopback fixture server stands in for openrouter.ai.
     nonisolated(unsafe) static var freeformHostsOverrideForTesting: Set<String>?
 

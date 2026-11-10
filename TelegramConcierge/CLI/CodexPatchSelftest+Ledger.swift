@@ -158,9 +158,11 @@ extension CodexPatchSelftest {
         let r3 = await t.apply(t.wrap("*** Add File: \(store)\n+{}"))
         let r4 = await t.apply(t.wrap("*** Delete File: \(store)"))
         let r5 = await t.apply(t.wrap("*** Update File: \(store)\n*** Move to: \(store).moved\n@@\n-\(newJina)\n+\(newJina)"))
-        t.check("S.3 Add/Delete/Move of the secret store are refused with the existing texts (P27)",
-                r3.text.contains(HarnessSecretStore.wholeFileRewriteRefusal) && r4.text.contains(HarnessSecretStore.deleteOrMoveRefusal)
-                && r5.text.contains(HarnessSecretStore.deleteOrMoveRefusal) && FileManager.default.fileExists(atPath: store)
+        t.check("S.3b the apply_patch refusals name no tool GPT lacks (pre-release review S2)",
+                [r3, r4, r5].allSatisfy { !$0.text.contains("edit_file") && !$0.text.contains("write_file") }, [r3, r4, r5].map(\.text).joined(separator: " | "))
+        t.check("S.3 Add/Delete/Move of the secret store are refused with the apply_patch texts (P27)",
+                r3.text.contains(HarnessSecretStore.patchWholeFileRewriteRefusal) && r4.text.contains(HarnessSecretStore.patchDeleteOrMoveRefusal)
+                && r5.text.contains(HarnessSecretStore.patchDeleteOrMoveRefusal) && FileManager.default.fileExists(atPath: store)
                 && !FileManager.default.fileExists(atPath: store + ".moved"), [r3, r4, r5].map(\.text).joined(separator: " | "))
 
         // Rollback by inverse delta: a later failure undoes the store edit;

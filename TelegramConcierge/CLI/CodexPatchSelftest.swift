@@ -90,6 +90,7 @@ struct CodexPatchSelftest: AsyncParsableCommand {
         if t.runs("C") { await scenarioCorpus(t) }
         if t.runs("G") { await goldenCorpus(t) }
         if t.runs("X") { await extractionTests(t) }
+        if t.runs("V") { await reviewEngineTests(t) }
         CodexPatchTransaction.faultInjector = nil
         CodexPatchTransaction.beforeRevalidateHook = nil
         CodexPatchTransaction.beforeRollbackHook = nil

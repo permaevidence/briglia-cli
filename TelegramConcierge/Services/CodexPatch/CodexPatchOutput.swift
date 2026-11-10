@@ -87,8 +87,12 @@ extension CodexPatch {
         guard let probe = missed.map(RustStr.trim).first(where: { $0.count >= 3 }) else { return nil }
         let probeGrams = bigrams(probe)
         guard !probeGrams.isEmpty else { return nil }
+        // Pre-release review L3: a stopped caller gets no hint (the engine
+        // reports the cancellation).
+        let cancelled = SeekCancellation.isCancelled
         var scored: [(index: Int, score: Double)] = []
         for (i, line) in fileLines.enumerated() {
+            if i & 1023 == 0, cancelled?() == true { return nil }
             let t = RustStr.trim(line)
             guard !t.isEmpty else { continue }
             let grams = bigrams(t)

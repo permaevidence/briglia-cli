@@ -53,7 +53,13 @@ final class GPTPatchSettlement: @unchecked Sendable {
     struct Settled: Equatable {
         let text: String
         let outcome: CodexPatch.EditOutcome
+        /// Pre-release review B1: the patch never started (it was queued
+        /// behind an earlier patch of its round when the run was stopped).
+        var notStarted = false
     }
+
+    /// The result of a GPT patch that never started (pre-release review B1).
+    static let notStartedText = "apply_patch did not run: the request was stopped before this patch's turn came (the patches of one response run one after another). No file was changed."
 
     /// Completed scopes kept for late consumers (a stopped run's completion
     /// notice); entries of a scope with a running call are never dropped.
@@ -76,6 +82,20 @@ final class GPTPatchSettlement: @unchecked Sendable {
         running[scope, default: []].insert(callID)
         settled[scope]?.removeValue(forKey: callID)
         touch(scope)
+        lock.unlock()
+    }
+
+    /// Pre-release review B1: a GPT patch call that never reached the engine
+    /// (stopped while queued behind an earlier patch of its round, or
+    /// cancelled before it started) gets a typed "not started" result —
+    /// never "outcome unknown". Recorded only when the call has neither
+    /// begun nor settled, so a real result is never overwritten.
+    func recordNotStartedIfAbsent(scope: String, callID: String) {
+        lock.lock()
+        guard running[scope]?.contains(callID) != true, settled[scope]?[callID] == nil else { lock.unlock(); return }
+        settled[scope, default: [:]][callID] = Settled(text: Self.notStartedText, outcome: .refused(.cancelled), notStarted: true)
+        touch(scope)
+        evict()
         lock.unlock()
     }
 
@@ -176,6 +196,7 @@ final class GPTPatchSettlement: @unchecked Sendable {
             if let s = settled[call.id] {
                 var r = ToolResultMessage(toolCallId: call.id, content: MarkerNeutralizer.escape(s.text))
                 r.editOutcome = s.outcome
+                if s.notStarted { r.outcomeBinding = OutcomeBinding(kind: .notExecuted) }
                 r.completedAt = at
                 return r
             }
@@ -220,6 +241,155 @@ final class GPTCancelFlag: @unchecked Sendable {
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 
+/// Pre-release review B1 (2026-11-09): one GPT patch transaction at a time in
+/// this process — main agent, subagents and every other executor alike. The
+/// engine's revalidate-then-rename is not atomic against a second writer, so
+/// two patches of one file could both pass revalidation before either
+/// renamed: one edit was lost while both reported success.
+///
+/// FIFO hand-off. A ticket whose caller is stopped while it waits leaves the
+/// queue at once and its patch never starts. Lock order: ClaimPathLocks
+/// (multi-assistant, taken before the tool body) → this lock → the
+/// config-file lock inside the commit; nothing that holds this lock waits
+/// for a claim, a round turn or another patch.
+final class GPTPatchSerializer: @unchecked Sendable {
+    static let shared = GPTPatchSerializer()
+
+    final class Ticket: @unchecked Sendable {
+        /// Guarded by the serializer's lock.
+        fileprivate enum State { case idle, waiting(CheckedContinuation<Bool, Never>), holding, released, cancelled }
+        fileprivate var state: State = .idle
+    }
+
+    /// Test seam: the negative control runs the engine unserialized.
+    nonisolated(unsafe) static var bypassForTesting = false
+
+    private let lock = NSLock()
+    private var held = false
+    private var queue: [Ticket] = []
+
+    /// true: the caller holds the lock and must `release` it. false: the
+    /// ticket was cancelled before its turn (nothing may run).
+    func acquire(_ ticket: Ticket) async -> Bool {
+        if Self.bypassForTesting {
+            lock.lock(); defer { lock.unlock() }
+            if case .idle = ticket.state { ticket.state = .released; return true }
+            return false
+        }
+        return await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            lock.lock()
+            guard case .idle = ticket.state else { lock.unlock(); c.resume(returning: false); return }
+            if !held {
+                held = true
+                ticket.state = .holding
+                lock.unlock()
+                c.resume(returning: true)
+            } else {
+                ticket.state = .waiting(c)
+                queue.append(ticket)
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Hands the lock to the next waiter (or frees it).
+    func release(_ ticket: Ticket) {
+        lock.lock()
+        guard case .holding = ticket.state else { lock.unlock(); return }
+        ticket.state = .released
+        while !queue.isEmpty {
+            let next = queue.removeFirst()
+            if case .waiting(let c) = next.state {
+                next.state = .holding
+                lock.unlock()
+                c.resume(returning: true)
+                return
+            }
+        }
+        held = false
+        lock.unlock()
+    }
+
+    /// The caller was stopped: a waiting ticket leaves the queue now, an idle
+    /// one will be refused; a holder keeps the lock (the engine's own
+    /// cancellation check, before the first mutation, decides).
+    func cancel(_ ticket: Ticket) {
+        lock.lock()
+        switch ticket.state {
+        case .idle:
+            ticket.state = .cancelled
+            lock.unlock()
+        case .waiting(let c):
+            ticket.state = .cancelled
+            queue.removeAll { $0 === ticket }
+            lock.unlock()
+            c.resume(returning: false)
+        case .holding, .released, .cancelled:
+            lock.unlock()
+        }
+    }
+
+    var isHeldForTesting: Bool { lock.lock(); defer { lock.unlock() }; return held }
+    var waitersForTesting: Int { lock.lock(); defer { lock.unlock() }; return queue.count }
+}
+
+/// Pre-release review B1: the GPT patches of one round (direct calls and
+/// intercepted heredocs) run one after another in the order the model sent
+/// them — Codex runs apply_patch under its exclusive tool lock, so a model
+/// may send several patches to one file in one response, each written
+/// against the result of the previous one. Every other tool of the round
+/// stays parallel. Turns are positions in the batch, never call ids.
+final class GPTPatchRoundOrder: @unchecked Sendable {
+    /// Test seam: the negative control lets a round's patches run in parallel.
+    nonisolated(unsafe) static var bypassForTesting = false
+
+    private let lock = NSLock()
+    private let count: Int
+    private var next = 0
+    private var done = Set<Int>()
+    private var waiting: [Int: CheckedContinuation<Bool, Never>] = [:]
+    private var cancelled = Set<Int>()
+
+    init(count: Int) { self.count = count }
+
+    /// One order for the GPT patch calls of `calls`, or nil (none, or the
+    /// test seam).
+    static func forBatch(_ calls: [ToolCall]) -> GPTPatchRoundOrder? {
+        let n = calls.filter(GPTPatchSettlement.isGPTPatchCall).count
+        return n > 0 && !bypassForTesting ? GPTPatchRoundOrder(count: n) : nil
+    }
+
+    /// true when it is `turn`'s turn; false when its caller was cancelled
+    /// first (the patch must not start).
+    func waitForTurn(_ turn: Int) async -> Bool {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+                lock.lock()
+                if cancelled.contains(turn) { lock.unlock(); c.resume(returning: false); return }
+                if turn == next { lock.unlock(); c.resume(returning: true); return }
+                waiting[turn] = c
+                lock.unlock()
+            }
+        } onCancel: {
+            lock.lock()
+            cancelled.insert(turn)
+            let c = waiting.removeValue(forKey: turn)
+            lock.unlock()
+            c?.resume(returning: false)
+        }
+    }
+
+    /// `turn` is over (ran, failed, or never started): the next one may start.
+    func finish(_ turn: Int) {
+        lock.lock()
+        done.insert(turn)
+        while done.contains(next) { next += 1 }
+        let c = next < count ? waiting.removeValue(forKey: next) : nil
+        lock.unlock()
+        c?.resume(returning: true)
+    }
+}
+
 extension ToolExecutor {
 
     // MARK: Dispatch (§3.4)
@@ -256,14 +426,21 @@ extension ToolExecutor {
 
     /// Test seam: runs inside the commit worker after the engine returns.
     nonisolated(unsafe) static var gptPatchWorkerHookForTesting: (@Sendable () async -> Void)?
+    /// Test seam: runs inside the worker before it asks for the process-wide
+    /// patch lock (pre-release review B1), with the call id.
+    nonisolated(unsafe) static var gptPatchBeforeLockHookForTesting: (@Sendable (String) async -> Void)?
 
     /// §12.2: the engine checks the caller's cancellation once, at the end of
     /// preflight. The work runs in an unstructured task (a structured child
     /// would inherit cancellation) that the caller awaits; ledger, stats and
     /// LSP side effects record the actual outcome inside the same worker, so
     /// a committed patch is never relabelled after a `/stop`.
+    /// Pre-release review B1: the engine runs under the process-wide patch
+    /// lock (read → commit); a caller stopped while waiting for it never
+    /// starts its patch.
     static func runGPTPatchSettled(request: CodexPatch.Request, scope: String, callID: String) async -> GPTPatchApplied {
         let flag = GPTCancelFlag()
+        let ticket = GPTPatchSerializer.Ticket()
         var req = request
         req.isCancelled = { flag.isSet }
         let engineRequest = req
@@ -272,7 +449,14 @@ extension ToolExecutor {
         // already cancelled sets the flag before preflight can finish.
         return await withTaskCancellationHandler {
             let worker = Task<GPTPatchApplied, Never> {
-                let result = await CodexPatch.apply(engineRequest)
+                if let hook = gptPatchBeforeLockHookForTesting { await hook(callID) }
+                let result: CodexPatch.Result
+                if await GPTPatchSerializer.shared.acquire(ticket) {
+                    result = await CodexPatch.apply(engineRequest)
+                    GPTPatchSerializer.shared.release(ticket)
+                } else {
+                    result = CodexPatch.refused(.cancelled, CodexPatch.cancelledText)
+                }
                 if let hook = gptPatchWorkerHookForTesting { await hook() }
                 let applied = await recordGPTPatchSideEffects(result, diagnostics: !flag.isSet)
                 GPTPatchSettlement.shared.finish(scope: scope, callID: callID, .init(text: applied.text, outcome: applied.outcome))
@@ -281,6 +465,7 @@ extension ToolExecutor {
             return await worker.value
         } onCancel: {
             flag.set()
+            GPTPatchSerializer.shared.cancel(ticket)
         }
     }
 
@@ -521,12 +706,18 @@ enum GPTShellRead {
     /// status `exited` (a command still running or moved to the background
     /// has neither), non-empty delivered stdout (or an empty file read whole
     /// with plain `cat`), identity unchanged around the command.
-    static func receipt(path: String, before: FileIdentity, command: String, resultContent: String) -> GPTEvidence.Receipt? {
+    /// Pre-release review S1: output that carries a current redaction
+    /// placeholder never counts — the model saw `[REDACTED:…]` where the
+    /// file has the real secret, so a whole-file rewrite built from it
+    /// would replace the secret with the placeholder.
+    static func receipt(path: String, before: FileIdentity, command: String, resultContent: String,
+                        placeholders: [String]) -> GPTEvidence.Receipt? {
         guard let data = resultContent.data(using: .utf8),
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               object["exit_code"] as? Int == 0, object["status"] as? String == "exited" else { return nil }
         let stdout = object["stdout"] as? String ?? ""
         guard !stdout.isEmpty || (before.size == 0 && isPlainCat(command)) else { return nil }
+        guard EditProtections.placeholder(in: stdout, placeholders) == nil else { return nil }
         guard let after = (try? FileIdentity.lstatPath(path)) ?? nil, after.sameState(as: before) else { return nil }
         return GPTEvidence.Receipt(key: CodexPatch.evidenceKey(path), identity: after, source: .shellRead)
     }
@@ -628,6 +819,36 @@ enum GPTShellIntercept {
     }
 
     static let notAShellCommandNote = "note: apply_patch is a tool, not a shell command; call the apply_patch tool directly"
+
+    /// Pre-release review L1: the directory a GPT bash command ran in, for
+    /// the relative-path hint — only when it is certain:
+    /// - a leading `cd <abs> && …` with no other directory change: that path;
+    /// - any other `cd`/`pushd`/`popd`: unknown (nil);
+    /// - otherwise an absolute `workdir`: that path; no workdir: unknown
+    ///   (the command ran in Briglia's own directory, which the model never saw).
+    static func workdirAfter(command: String, workdir: String?) -> String? {
+        let trimmed = Substring(command.trimmingCharacters(in: .whitespacesAndNewlines))
+        if trimmed.hasPrefix("cd ") {
+            let afterCd = trimmed.dropFirst(3).drop(while: { $0 == " " })
+            if let (path, rest) = parsePathWord(afterCd), path.hasPrefix("/") {
+                let r = rest.drop(while: { $0 == " " })
+                if r.hasPrefix("&&"), !mayChangeDirectory(String(r.dropFirst(2))) {
+                    return URL(fileURLWithPath: path).standardizedFileURL.path
+                }
+            }
+            return nil
+        }
+        if mayChangeDirectory(command) { return nil }
+        if let wd = workdir.map(FilesystemTools.normalizePath), wd.hasPrefix("/") { return wd }
+        return nil
+    }
+
+    /// Whether a command may change its shell's directory (a `cd`, `pushd`
+    /// or `popd` in command position; conservative: a false positive only
+    /// drops the hint).
+    static func mayChangeDirectory(_ command: String) -> Bool {
+        command.range(of: #"(^|[;&|(){}\n`]|\$\(|\b(then|do|else)\b)\s*(cd|pushd|popd)(\s|;|&|\||\)|$)"#, options: .regularExpression) != nil
+    }
 }
 
 extension ToolExecutor {
@@ -637,6 +858,14 @@ extension ToolExecutor {
         return object["command"] as? String
     }
 
+    /// A bash call's absolute `workdir`, normalised, or nil.
+    static func bashWorkdir(_ call: ToolCall) -> String? {
+        guard let data = call.function.arguments.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let wd = (object["workdir"] as? String).map(FilesystemTools.normalizePath), wd.hasPrefix("/") else { return nil }
+        return wd
+    }
+
     /// A GPT-stamped bash call (not an intercepted heredoc): records the
     /// absolute workdir for the D2 hint, credits a recognised single-file
     /// read (§7), and adds the 127 note for `apply_patch` used as a command.
@@ -644,12 +873,13 @@ extension ToolExecutor {
         let object = (call.function.arguments.data(using: .utf8)).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
         let command = object["command"] as? String ?? ""
         let workdir = object["workdir"] as? String
-        if let wd = workdir.map(FilesystemTools.normalizePath), wd.hasPrefix("/") { gptLastWorkdir = wd }
+        gptLastWorkdir = GPTShellIntercept.workdirAfter(command: command, workdir: workdir)
         let target = GPTShellRead.target(command: command, workdir: workdir)
         let before = target.flatMap { (try? FileIdentity.lstatPath($0)) ?? nil }
         var result = await executeBash(call)
         if let target, let before,
-           let receipt = GPTShellRead.receipt(path: target, before: before, command: command, resultContent: result.content) {
+           let receipt = GPTShellRead.receipt(path: target, before: before, command: command, resultContent: result.content,
+                                              placeholders: EditProtections.currentRedactionPlaceholders()) {
             result.gptEvidence = GPTEvidenceSettlement(receipts: [receipt])
         }
         if let data = result.content.data(using: .utf8),

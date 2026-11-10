@@ -65,6 +65,9 @@ extension SIWCSelftest {
                 && inner[slot]["format"]?.responsesObject?["definition"]?.responsesString == GPTFreeform.grammar
                 && inner.enumerated().allSatisfy { $0.offset == slot || $0.element["type"]?.responsesString == "function" })
         c.check("gpt-patch: the body passes the SIWC invariants", wire.count > 0 && (try? SIWCBody.check(wire.body(0))) != nil)
+        let firstRaw = wire.count > 0 ? wire.rawBody(0) : ""
+        c.check("gpt-patch: the request body names no tool GPT lacks (pre-release review S2)",
+                !firstRaw.isEmpty && !["edit_file", "write_file", "old_string"].contains(where: { firstRaw.contains($0) }))
         guard case .toolCalls(let assistant, let calls, _, _, _)? = first, let call = calls.first else {
             c.check("gpt-patch: a namespaced custom_tool_call decodes", false); return
         }

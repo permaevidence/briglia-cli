@@ -92,6 +92,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         if t.runs("W") { await wireTests(t) }
         if t.runs("X") { await transitionTests(t) }
         if t.runs("Y") { await stage3Tests(t) }
+        if t.runs("Z") { await reviewTests(t) }
         GPTPatchSwitch.storedOverrideForTesting = nil
         GPTPatchRoute.freeformHostsOverrideForTesting = nil
         GPTPatchFormStore.fileURLOverrideForTesting = nil
@@ -145,7 +146,10 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         t.check("R OpenRouter chat GPT → JSON", resolve(chat("openai/gpt-6-luna")) == .gptJSON)
         t.check("R OpenRouter Responses server GPT → freeform", resolve(responses("openai/gpt-6-luna", base: "https://openrouter.ai/api/v1")) == .gptFreeform)
         t.check("R OpenRouter Responses host match ignores case", resolve(responses("openai/gpt-6-luna", base: "https://OpenRouter.ai/api/v1")) == .gptFreeform)
-        t.check("R OpenAI key (api.openai.com Responses) → JSON", resolve(responses("gpt-6-sol", base: "https://api.openai.com/v1")) == .gptJSON)
+        t.check("R OpenAI key (api.openai.com Responses) → freeform (pre-release review L2)", resolve(responses("gpt-6-sol", base: "https://api.openai.com/v1")) == .gptFreeform)
+        t.check("R OpenAI key over Chat Completions → JSON", resolve(chat("gpt-6-sol", provider: .openAICompatible, endpoint: "https://api.openai.com/v1")) == .gptJSON)
+        t.check("R api.openai.com spoof in a path is not the OpenAI API",
+                resolve(responses("gpt-6-sol", base: "https://evil.example.com/api.openai.com/v1")) == .gptJSON)
         t.check("R OpenCode Responses → JSON", resolve(responses("gpt-5.6-luna", base: "https://opencode.ai/zen/go/v1")) == .gptJSON)
         t.check("R custom endpoint Responses → JSON", resolve(responses("gpt-6-sol", base: "https://llm.example.com/v1")) == .gptJSON)
         t.check("R custom endpoint chat → JSON", resolve(chat("gpt-6-sol", provider: .openAICompatible, endpoint: "https://llm.example.com/v1")) == .gptJSON)
@@ -259,7 +263,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
                 ? bashVariants.filter { $0.function.description.contains(rewrite.from) }
                 : [standardByName[rewrite.tool]].compactMap { $0 }
             let once = sources.count == 1 && sources[0].function.description.components(separatedBy: rewrite.from).count == 2
-            let variant = sources.first.map(AvailableTools.gptVariant)
+            let variant = sources.first.map { AvailableTools.gptVariant($0) }
             t.check("U rewrite of \(rewrite.tool) matches its standard text exactly once and replaces it: \(rewrite.from.prefix(40))…",
                     once && variant.map { !$0.function.description.contains(rewrite.from) && $0.function.description.contains(rewrite.to) } == true)
         }

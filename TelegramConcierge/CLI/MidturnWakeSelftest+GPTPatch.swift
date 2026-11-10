@@ -147,6 +147,26 @@ extension MidturnHarness {
             check("gptpatch fast completion: the stop reply names the applied edit (Codex S2 round 2)",
                   committed && reply.contains("The file edit was applied to 1 file") && !reply.contains("still finishing"), reply)
         }
+        // 6. Pre-release review B1: two patches in one round run one after
+        // the other. /stop while the first is held: it keeps its real result;
+        // the second, still waiting for its turn, never runs and is recorded
+        // as not started (typed not_executed), not "outcome unknown".
+        do {
+            _ = await seed("f.txt")
+            _ = await seed("g.txt")
+            let manager = await stoppedRun([Self.chatTools([("gp_c6a", "apply_patch", ["input": patch("f.txt")]),
+                                                            ("gp_c6b", "apply_patch", ["input": patch("g.txt")])]),
+                                            Self.chatText("done")],
+                                           file: "f.txt", label: "queued", callID: "gp_c6b")
+            let first = results(manager).first { $0.toolCallId == "gp_c6a" }
+            let second = results(manager).first { $0.toolCallId == "gp_c6b" }
+            check("gptpatch queued: the held first patch keeps its real result",
+                  first?.content.hasPrefix("Success. Updated the following files:") == true, first?.content ?? "no result")
+            check("gptpatch queued: the second patch never ran and is recorded as not started (pre-release review B1)",
+                  second?.content == GPTPatchSettlement.notStartedText && second?.outcomeBinding?.kind == .notExecuted
+                  && (try? String(contentsOfFile: resolved + "/g.txt", encoding: .utf8)) == "old\n",
+                  "\(second?.content ?? "no result") \(String(describing: second?.outcomeBinding?.kind))")
+        }
         try? FileManager.default.removeItem(atPath: dir)
     }
 }

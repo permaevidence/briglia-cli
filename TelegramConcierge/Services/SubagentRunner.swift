@@ -422,11 +422,14 @@ actor SubagentRunner {
         //    never inspect or kill a detached process), executor capability
         //    .foregroundOnly — detaching is rejected, not honored.
         let filteredNames = Set(filteredTools.map { $0.function.name })
+        // Pre-release review S2: a GPT child without apply_patch gets the
+        // read-only bash note (nothing about editing).
+        let canPatch = filteredNames.contains("apply_patch")
         if filteredNames.contains("bash") {
             if filteredNames.contains("bash_manage") {
                 filteredTools = filteredTools.map {
                     switch $0.function.name {
-                    case "bash":        return editing.isGPT ? AvailableTools.gptVariant(AvailableTools.bashSubagentManaged) : AvailableTools.bashSubagentManaged
+                    case "bash":        return editing.isGPT ? AvailableTools.gptVariant(AvailableTools.bashSubagentManaged, canPatch: canPatch) : AvailableTools.bashSubagentManaged
                     case "bash_manage": return AvailableTools.bashManageSubagentManaged
                     default:            return $0
                     }
@@ -435,7 +438,7 @@ actor SubagentRunner {
             } else {
                 filteredTools = filteredTools.map {
                     $0.function.name == "bash"
-                        ? (editing.isGPT ? AvailableTools.gptVariant(AvailableTools.bashForegroundOnly) : AvailableTools.bashForegroundOnly)
+                        ? (editing.isGPT ? AvailableTools.gptVariant(AvailableTools.bashForegroundOnly, canPatch: canPatch) : AvailableTools.bashForegroundOnly)
                         : $0
                 }
                 await toolExecutor.setSubagentBashCapability(.foregroundOnly)

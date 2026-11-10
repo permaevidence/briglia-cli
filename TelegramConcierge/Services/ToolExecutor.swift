@@ -208,13 +208,16 @@ actor ToolExecutor {
     // MARK: - Bash wait policy (BASH_V2_PLAN §9)
 
     private var bashWaitLedger = BashWaitLedger()
-    /// Last absolute `workdir` a GPT run used with bash (the apply_patch
-    /// relative-path hint, GPT_APPLY_PATCH_PLAN D2).
+    /// The working directory of the GPT run's last bash command, when it is
+    /// certain (the apply_patch relative-path hint, GPT_APPLY_PATCH_PLAN D2);
+    /// nil once a command may have changed directory. Per run (pre-release
+    /// review L1): reset by `setGPTSettlementScope` at every run start.
     var gptLastWorkdir: String?
     /// The owning run or lane of this executor's GPT patches (§12.2
-    /// settlement registry key); set by the owner at the start of each run.
+    /// settlement registry key); set by the owner at the start of each run,
+    /// which also forgets the previous run's working directory.
     var gptSettlementScope: String = "exec:" + UUID().uuidString
-    func setGPTSettlementScope(_ scope: String) { gptSettlementScope = scope }
+    func setGPTSettlementScope(_ scope: String) { gptSettlementScope = scope; gptLastWorkdir = nil }
     /// Admissions preflighted for the current tool round, keyed by call id.
     private var pendingWaitAdmissions: [String: BashWaitLedger.Admission] = [:]
 
@@ -437,7 +440,10 @@ actor ToolExecutor {
         let call = intercepted ?? originalCall
         if intercepted != nil {
             StageMarkers.event("bash.apply_patch_intercept", detail: nil, call: nil)
-            if let wd = GPTShellIntercept.patchBody(command: Self.bashCommand(originalCall) ?? "")?.cdPath { gptLastWorkdir = wd }
+            // Pre-release review L1: where this heredoc "ran" — its leading
+            // `cd <abs>`, else its absolute workdir, else unknown.
+            gptLastWorkdir = GPTShellIntercept.patchBody(command: Self.bashCommand(originalCall) ?? "")?.cdPath
+                ?? Self.bashWorkdir(originalCall)
         }
         // Stage markers (diagnostics only; never change behaviour): the
         // executor actor was acquired, then every stage of the call.
@@ -755,22 +761,48 @@ actor ToolExecutor {
         // Only depth-0 main-executor calls can be woken by a mid-turn user
         // message (§3.1): the scope is captured once, now, for this batch.
         let wakeScope = (depth == 0 && outputMode == .mainAgent) ? wakeTurn : nil
+        // Pre-release review B1: the GPT patches of this round run one at a
+        // time, in the model's order; every other call stays parallel. A
+        // patch that never starts (stopped while queued) gets a typed
+        // "not started" result instead of "outcome unknown".
+        let patchOrder = GPTPatchRoundOrder.forBatch(calls)
+        let settlementScope = gptSettlementScope
+        var nextTurn = 0
         return try await withThrowingTaskGroup(of: ToolResultMessage.self) { group in
             for call in calls {
+                let isPatch = GPTPatchSettlement.isGPTPatchCall(call)
+                var turn: Int? = nil
+                if isPatch, patchOrder != nil { turn = nextTurn; nextTurn += 1 }
+                let patchTurn = turn
                 group.addTask {
-                    try Task.checkCancellation()
-                    // Diagnostics: time spent waiting to enter the executor actor.
-                    let acquire = StageMarkers.enter(
-                        "executor.actor_acquire",
-                        call: StageMarkers.CallContext(callId: call.id, tool: call.function.name, depth: self.depth))
-                    guard let wakeScope else { return try await self.execute(call, acquireToken: acquire) }
-                    let context = WakeContext(
-                        turnRunId: wakeScope.runId, callId: call.id, toolName: call.function.name,
-                        fingerprint: OutcomeBinding.fingerprint(toolName: call.function.name,
-                                                                arguments: call.function.arguments),
-                        callStartedAt: .now, historyAnchorMessageId: wakeScope.anchor)
-                    return try await WakeContext.$current.withValue(context) {
-                        try await self.execute(call, acquireToken: acquire)
+                    if let patchTurn, let patchOrder {
+                        guard await patchOrder.waitForTurn(patchTurn), !Task.isCancelled else {
+                            patchOrder.finish(patchTurn)
+                            GPTPatchSettlement.shared.recordNotStartedIfAbsent(scope: settlementScope, callID: call.id)
+                            throw CancellationError()
+                        }
+                    }
+                    defer { if let patchTurn { patchOrder?.finish(patchTurn) } }
+                    do {
+                        try Task.checkCancellation()
+                        // Diagnostics: time spent waiting to enter the executor actor.
+                        let acquire = StageMarkers.enter(
+                            "executor.actor_acquire",
+                            call: StageMarkers.CallContext(callId: call.id, tool: call.function.name, depth: self.depth))
+                        guard let wakeScope else { return try await self.execute(call, acquireToken: acquire) }
+                        let context = WakeContext(
+                            turnRunId: wakeScope.runId, callId: call.id, toolName: call.function.name,
+                            fingerprint: OutcomeBinding.fingerprint(toolName: call.function.name,
+                                                                    arguments: call.function.arguments),
+                            callStartedAt: .now, historyAnchorMessageId: wakeScope.anchor)
+                        return try await WakeContext.$current.withValue(context) {
+                            try await self.execute(call, acquireToken: acquire)
+                        }
+                    } catch {
+                        // Threw before the engine began (a begun patch always
+                        // returns its settled result): it never started.
+                        if isPatch { GPTPatchSettlement.shared.recordNotStartedIfAbsent(scope: settlementScope, callID: call.id) }
+                        throw error
                     }
                 }
             }

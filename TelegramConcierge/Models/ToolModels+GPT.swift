@@ -41,7 +41,12 @@ extension AvailableTools {
 
     // MARK: Rewritten descriptions (§4.3)
 
-    static let gptReadNote = "Reading files with `cat`, `sed -n`, `nl -ba` or `rg` is fine. Edit files with the apply_patch tool, not with shell redirection or `sed -i`."
+    /// The bash note of a GPT run that can patch (pre-release review S1: plus
+    /// the one sentence about redaction placeholders).
+    static let gptReadNote = "Reading files with `cat`, `sed -n`, `nl -ba` or `rg` is fine. Edit files with the apply_patch tool, not with shell redirection or `sed -i`. Registered secrets in bash output appear as `[REDACTED:…]` placeholders, which are not the files' real text: never copy one into a patch."
+    /// The bash note of a GPT run without apply_patch (a read-only child with
+    /// bash, e.g. Browse): nothing about editing (pre-release review S2).
+    static let gptReadOnlyNote = "Reading files with `cat`, `sed -n`, `nl -ba` or `rg` is fine."
 
     /// (tool name, standard text, GPT text). Each pair must match exactly
     /// once in the standard description (selftest).
@@ -52,6 +57,8 @@ extension AvailableTools {
                       "- Do NOT re-read a file you just patched to verify — apply_patch would have errored if the change failed."),
         ("grep", "- ALWAYS use grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The grep tool has been optimized for correct permissions, ignore lists, and output shaping — the Bash equivalents bypass all of that.",
                  "- Use this tool or `rg` in bash, whichever is simpler."),
+        ("grep", "never build edit_file old_string or write_file content from a redacted grep line;",
+                 "never copy a redacted grep line into a patch;"),
         ("glob", "- Use instead of bash find/ls — the glob tool has optimized permissions and output.",
                  "- Use this tool or `find`/`ls` in bash, whichever is simpler."),
         ("bash", "Prefer glob, grep, read_file, edit_file, and write_file for file operations, and reply directly instead of using echo/printf for communication.",
@@ -62,14 +69,17 @@ extension AvailableTools {
 
     /// The `.gpt` variant of one definition (identity for tools §4.3 does
     /// not name). Bash variants are told apart by their own text, so the
-    /// main, managed-subagent and foreground-only `bash` all get the note.
-    static func gptVariant(_ tool: ToolDefinition) -> ToolDefinition {
+    /// main, managed-subagent and foreground-only `bash` all get the note;
+    /// a run whose list has no apply_patch (`canPatch` false) gets the
+    /// read-only note (pre-release review S2).
+    static func gptVariant(_ tool: ToolDefinition, canPatch: Bool = true) -> ToolDefinition {
         let rewrites = gptDescriptionRewrites.filter { $0.tool == tool.function.name }
         guard !rewrites.isEmpty else { return tool }
         var description = tool.function.description
         for rewrite in rewrites where description.contains(rewrite.from) {
             description = description.replacingOccurrences(of: rewrite.from, with: rewrite.to)
         }
+        if !canPatch { description = description.replacingOccurrences(of: gptReadNote, with: gptReadOnlyNote) }
         return ToolDefinition(function: FunctionDefinition(name: tool.function.name, description: description,
                                                            parameters: tool.function.parameters))
     }
@@ -81,6 +91,7 @@ extension AvailableTools {
     /// edit tools gains none), and rewrites the §4.3 descriptions.
     static func applyEditing(_ tools: [ToolDefinition], _ editing: EditingConfig) -> [ToolDefinition] {
         guard editing.isGPT else { return tools }
+        let canPatch = tools.contains { gptPatchGrantingNames.contains($0.function.name) }
         var out: [ToolDefinition] = []
         var inserted = false
         for tool in tools {
@@ -88,7 +99,7 @@ extension AvailableTools {
             case "edit_file", "write_file", "apply_patch":
                 if !inserted { out.append(applyPatchGPT); inserted = true }
             default:
-                out.append(gptVariant(tool))
+                out.append(gptVariant(tool, canPatch: canPatch))
             }
         }
         return out

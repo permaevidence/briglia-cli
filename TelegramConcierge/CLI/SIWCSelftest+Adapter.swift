@@ -25,6 +25,10 @@ extension SIWCSelftest {
             lock.lock(); defer { lock.unlock() }
             return (try? JSONDecoder().decode(JSONValue.self, from: requests[i].httpBody ?? Data()))?.responsesObject ?? [:]
         }
+        func rawBody(_ i: Int) -> String {
+            lock.lock(); defer { lock.unlock() }
+            return String(decoding: requests[i].httpBody ?? Data(), as: UTF8.self)
+        }
     }
 
     static func completed(text: String? = "OK", calls: [(String, String?)] = []) -> Data {

@@ -350,6 +350,16 @@ enum HarnessSecretStore {
         "refused: \(storePath) is Briglia's own secret store and cannot be deleted or moved by the file tools. Use edit_file for individual fields; /deleteuserdata removes the store."
     }
 
+    /// The same two refusals as the GPT `apply_patch` (CodexPatch) words
+    /// them: a GPT run has no edit_file or write_file (pre-release review S2).
+    static var patchWholeFileRewriteRefusal: String {
+        "refused: \(storePath) is Briglia's own secret store and is read with the Telegram bot token masked, so writing the whole file would overwrite the real token with the placeholder. Change individual fields (Serper, Jina, AgentMail, provider keys…) with an *** Update File hunk; the token itself is managed by /switchbot."
+    }
+
+    static var patchDeleteOrMoveRefusal: String {
+        "refused: \(storePath) is Briglia's own secret store and cannot be deleted or moved by apply_patch. Change individual fields with an *** Update File hunk; /deleteuserdata removes the store."
+    }
+
     /// Post-edit invariant, the check the text-level refusals cannot provide
     /// (an edit may target a substring of the token or of the field name):
     /// parse both versions of the store and require the token entry to be

@@ -28,6 +28,21 @@ enum EditProtections {
         return HarnessSecretStore.patchRefusal(changedLines: changed)
     }
 
+    /// Pre-release review S1: the exact placeholders tool output shows right
+    /// now (`[REDACTED:<label>]` for every label of the live redaction
+    /// environment — the Telegram bot token, the ChatGPT sign-in tokens and
+    /// the user's service keys). Never the bare `[REDACTED:` prefix: files
+    /// such as Briglia's own sources legitimately contain it.
+    static func currentRedactionPlaceholders() -> [String] {
+        KeychainHelper.redactionEnvironment().keys.sorted().map { "[REDACTED:\($0)]" }
+    }
+
+    /// The first placeholder of `placeholders` that `text` contains, or nil.
+    static func placeholder(in text: String, _ placeholders: [String]) -> String? {
+        guard text.contains("[REDACTED:") else { return nil }
+        return placeholders.first { text.contains($0) }
+    }
+
     /// Runs `body` under the sidecar lock of the MCP routing/config file when
     /// `path` is one of them (forward path and rollback alike).
     static func withConfigFileLock<T>(_ path: String, _ body: () throws -> T) throws -> T {

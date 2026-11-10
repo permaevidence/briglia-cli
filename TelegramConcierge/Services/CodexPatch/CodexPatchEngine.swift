@@ -24,14 +24,40 @@ extension CodexPatch {
         var input: String
         /// Last absolute `workdir` the model used this run (D2 hint).
         var lastWorkdir: String? = nil
-        /// Checked once, at the end of preflight, before the first mutation.
+        /// Checked during preflight (long searches) and at its end, before the
+        /// first mutation.
         var isCancelled: @Sendable () -> Bool = { false }
         var limits: Limits = .standard
-        init(input: String, lastWorkdir: String? = nil, isCancelled: @escaping @Sendable () -> Bool = { false }, limits: Limits = .standard) {
+        /// Pre-release review S1: the redaction placeholders tool output
+        /// shows now; an added line may not contain one. nil = read the live
+        /// redaction environment.
+        var redactionPlaceholders: [String]? = nil
+        init(input: String, lastWorkdir: String? = nil, isCancelled: @escaping @Sendable () -> Bool = { false }, limits: Limits = .standard,
+             redactionPlaceholders: [String]? = nil) {
             self.input = input
             self.lastWorkdir = lastWorkdir
             self.isCancelled = isCancelled
             self.limits = limits
+            self.redactionPlaceholders = redactionPlaceholders
+        }
+    }
+
+    /// Pre-release review S1: an added line (an Add File's contents, an
+    /// Update's `+` lines) carries a current redaction placeholder.
+    static func placeholderRefusal(display: String, addedText: [String], placeholders: [String]) -> Refusal? {
+        for text in addedText {
+            guard let p = EditProtections.placeholder(in: text, placeholders) else { continue }
+            return Refusal(category: .protected, text: verificationFailure(
+                "the new text for \(display) contains \(p), a placeholder that tool output shows instead of a registered secret — it is not the file's real text. Never copy a placeholder into a patch: patch around the line that holds the secret, or read the file with read_file (whose output is not redacted) before rewriting it."))
+        }
+        return nil
+    }
+
+    /// The `+` lines of an Update's chunks.
+    static func addedLines(_ chunks: [Chunk]) -> [String] {
+        chunks.flatMap { chunk -> [String] in
+            let context = Set(chunk.contextLineIndices.map(\.new))
+            return chunk.newLines.enumerated().filter { !context.contains($0.offset) }.map(\.element)
         }
     }
 
@@ -106,21 +132,31 @@ extension CodexPatch {
         let preflightToken = StageMarkers.enter("fs.patch_preflight", detail: "files=\(args.hunks.count)")
         let ops: [PlannedOp]
         do {
-            ops = try await preflight(args.hunks, request: request)
+            // Pre-release review L3: long searches poll the caller's
+            // cancellation (a stopped search reports no match; the check
+            // below turns any refusal of a cancelled preflight into the
+            // cancellation itself).
+            ops = try await SeekCancellation.$isCancelled.withValue(request.isCancelled) {
+                try await preflight(args.hunks, request: request)
+            }
             StageMarkers.exit(preflightToken, .ok)
         } catch let r as Refusal {
             StageMarkers.exit(preflightToken, .error)
+            if request.isCancelled() { return refused(.cancelled, cancelledText) }
             return refused(r.category, r.text)
         } catch {
             StageMarkers.exit(preflightToken, .error)
+            if request.isCancelled() { return refused(.cancelled, cancelledText) }
             return refused(.io, verificationFailure("\(error)"))
         }
-        // Plan §12.2: the only cancellation point, before any mutation.
+        // Plan §12.2: the last cancellation point, before any mutation.
         if request.isCancelled() {
-            return refused(.cancelled, "apply_patch was cancelled before any file was changed.")
+            return refused(.cancelled, cancelledText)
         }
         return await commit(ops, hunks: args.hunks)
     }
+
+    static let cancelledText = "apply_patch was cancelled before any file was changed."
 
     static func refused(_ category: Category, _ text: String) -> Result {
         Result(text: text, outcome: .refused(category))
@@ -152,7 +188,7 @@ extension CodexPatch {
             var hint = ""
             if let wd = request.lastWorkdir, wd.hasPrefix("/") {
                 let joined = URL(fileURLWithPath: wd).appendingPathComponent(display).standardizedFileURL.path
-                hint = " Your last workdir in this run was \(wd); did you mean \(joined)?"
+                hint = " Your last bash command in this run ran in \(wd); relative to it, that path is \(joined)."
             }
             throw Refusal(category: .path, text: verificationFailure("\(display.isEmpty ? "(empty path)" : display) is not an absolute path. Paths in apply_patch must be absolute (for example /Users/…/repo/src/x.py); Briglia has no working directory.\(hint)"))
         }
@@ -201,6 +237,7 @@ extension CodexPatch {
         var ops: [PlannedOp] = []
         var totalBytes = 0
         let limits = request.limits
+        let placeholders = request.redactionPlaceholders ?? EditProtections.currentRedactionPlaceholders()
 
         func claimKey(_ r: ResolvedPath) throws {
             if seen[r.key] != nil {
@@ -257,8 +294,9 @@ extension CodexPatch {
                 try claimKey(r)
                 try protectedCheck([r.display])
                 if EditProtections.isSecretStore(r.display) {
-                    throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.wholeFileRewriteRefusal))
+                    throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.patchWholeFileRewriteRefusal))
                 }
+                if let refusal = placeholderRefusal(display: r.display, addedText: [hunk.contents], placeholders: placeholders) { throw refusal }
                 let data = Data(hunk.contents.utf8)
                 try account(data.count, r.display)
                 var write = PlannedWrite(display: r.display, target: r.leaf, inScope: writeScope(r), pre: nil, data: data, finalMode: newFileMode(r))
@@ -282,7 +320,7 @@ extension CodexPatch {
                 try claimKey(r)
                 try protectedCheck([r.display])
                 if EditProtections.isSecretStore(r.display) {
-                    throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.deleteOrMoveRefusal))
+                    throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.patchDeleteOrMoveRefusal))
                 }
                 switch r.leafID?.kind {
                 case nil: throw Refusal(category: .path, text: verificationFailure("Failed to read \(r.display): \(CodexPatchFS.rustOSError(ENOENT))"))
@@ -301,18 +339,30 @@ extension CodexPatch {
                 var destination: ResolvedPath? = nil
                 if let move = hunk.movePath {
                     let d = try resolve(move, request: request)
+                    // Pre-release review L1 (engine): a destination that is
+                    // the source itself — a rename changing only letter case
+                    // on a case-insensitive volume, or a hard link of it —
+                    // can never be patched as a move: say so plainly.
+                    if let rid = r.leafID, let did = d.leafID, rid.device == did.device, rid.inode == did.inode {
+                        throw Refusal(category: .path, text: verificationFailure(
+                            "\(r.display) and \(d.display) are the same file (a rename that only changes letter case on a case-insensitive volume, or a hard link of it). Rename it with `mv` in bash, then patch it."))
+                    }
                     try claimKey(d)
                     destination = d
                 }
                 try protectedCheck([r.display] + (destination.map { [$0.display] } ?? []) + (r.resolvedTarget.map { [$0] } ?? []))
                 let isStore = EditProtections.isSecretStore(r.display)
                 if isStore {
-                    if destination != nil { throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.deleteOrMoveRefusal)) }
+                    if destination != nil { throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.patchDeleteOrMoveRefusal)) }
                     if let refusal = EditProtections.secretStoreChunkRefusal(hunk.chunks) {
                         throw Refusal(category: .protected, text: verificationFailure(refusal))
                     }
                 } else if let d = destination, EditProtections.isSecretStore(d.display) {
-                    throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.wholeFileRewriteRefusal))
+                    throw Refusal(category: .protected, text: verificationFailure(HarnessSecretStore.patchWholeFileRewriteRefusal))
+                }
+                if !isStore, let refusal = placeholderRefusal(display: destination?.display ?? r.display,
+                                                              addedText: addedLines(hunk.chunks), placeholders: placeholders) {
+                    throw refusal
                 }
                 // Source: a regular file, or a link to one (written through).
                 let sourcePath: String
@@ -363,8 +413,12 @@ extension CodexPatch {
                     return writeScope(r)
                 }()
                 if let d = destination {
+                    // Pre-release review L2 (engine): a moved file keeps its
+                    // mode (exec bit), as `mv` / `git mv` would; inside the
+                    // roots the private-storage policy still applies.
                     var write = PlannedWrite(display: d.display, target: d.leaf, inScope: writeScope(d), pre: nil,
-                                             data: derived.newContents, finalMode: newFileMode(d), fuzz: derived.fuzz)
+                                             data: derived.newContents,
+                                             finalMode: existingMode(d, targetIsInScope: writeScope(d), pre.identity.mode), fuzz: derived.fuzz)
                     switch d.leafID?.kind {
                     case nil: break
                     case .regular?:

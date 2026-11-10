@@ -127,7 +127,7 @@ extension CodexPatchSelftest {
         do {
             let r = await t.apply(t.wrap("*** Add File: src/x.py\n+x"), workdir: "/Users/me/repo")
             t.check("E.P1 a relative path is refused with the last-workdir hint",
-                    r.outcome.status == .refused && r.outcome.category == .path && r.text.contains("did you mean /Users/me/repo/src/x.py?"), r.text)
+                    r.outcome.status == .refused && r.outcome.category == .path && r.text.contains("ran in /Users/me/repo; relative to it, that path is /Users/me/repo/src/x.py."), r.text)
         }
         do {
             let expanded = CodexPatch.normalizePath("~/cp-tilde.txt")
@@ -234,6 +234,10 @@ extension CodexPatchSelftest {
             let r = await CodexPatch.apply(.init(input: t.wrap("*** Update File: \(d)/a.txt\n@@\n-a\n+b"), isCancelled: { true }))
             t.check("E.L6 cancellation at the end of preflight: nothing changed, outcome cancelled",
                     r.outcome.status == .refused && r.outcome.category == .cancelled && t.read(d + "/a.txt") == "a\n", r.text)
+            // An Add searches nothing: only the end-of-preflight check can see the stop.
+            let r2 = await CodexPatch.apply(.init(input: t.wrap("*** Add File: \(d)/new.txt\n+n"), isCancelled: { true }))
+            t.check("E.L6b cancellation of a patch with no search: the end-of-preflight check, nothing created",
+                    r2.outcome.category == .cancelled && !t.exists(d + "/new.txt"), r2.text)
         }
     }
 

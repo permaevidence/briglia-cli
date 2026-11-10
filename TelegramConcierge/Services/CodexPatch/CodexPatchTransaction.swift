@@ -156,13 +156,32 @@ enum CodexPatchTransaction {
         let hash: String
     }
 
+    /// Pre-release review (engine S1): temp names have a fixed length
+    /// (`.bp-<16 hex>.tmp`, 24 bytes) whatever the target's name, so every
+    /// name the file system accepts can be added or patched (the old
+    /// `.<name>.tmp-<UUID>` added 42 bytes and failed past ~213).
+    static let tempPrefix = ".bp-"
+    static let tempSuffix = ".tmp"
+    static let tempNameLength = tempPrefix.count + 16 + tempSuffix.count
+
+    static func tempName() -> String {
+        let hex = String(UInt64.random(in: .min ... .max), radix: 16)
+        return tempPrefix + String(repeating: "0", count: 16 - hex.count) + hex + tempSuffix
+    }
+
+    /// Whether a directory entry name is one of this writer's temps.
+    static func isTempName(_ name: String) -> Bool {
+        guard name.count == tempNameLength, name.hasPrefix(tempPrefix), name.hasSuffix(tempSuffix) else { return false }
+        return name.dropFirst(tempPrefix.count).dropLast(tempSuffix.count).allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
     /// Temp file in the target's directory, registered in the journal at
     /// creation (before write, chmod or fsync can fail), data written, final
     /// mode set before exposure (`nil` = keep the umask-applied creation
     /// mode of a new file outside the policy's scope), fsync.
     static func stage(_ data: Data, forTarget target: String, finalMode: mode_t?, journal: Journal) throws -> StagedFile {
         let url = URL(fileURLWithPath: target)
-        let temp = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)").path
+        let temp = url.deletingLastPathComponent().appendingPathComponent(tempName()).path
         if injected(.stageCreate, target) { throw StepError.io("could not create a temporary file next to \(target): injected failure (test seam)") }
         let fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, finalMode == nil ? 0o666 : 0o600)
         guard fd >= 0 else { throw StepError.io("could not create a temporary file next to \(target): \(String(cString: strerror(errno)))") }
