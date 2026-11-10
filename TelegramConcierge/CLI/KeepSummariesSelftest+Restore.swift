@@ -51,16 +51,25 @@ extension RetentionHarness {
         check("K12b reverse measuredTokens delta returns the pre-demotion value",
               a0?.measuredTokens == 1_000 && message(legacy, "REPLY_A0")?.measuredTokens != 1_000,
               "\(String(describing: a0?.measuredTokens)) vs legacy \(String(describing: message(legacy, "REPLY_A0")?.measuredTokens))")
-        check("K12c default 3: the restored history composes to exactly the 0.2.57 messages (same request bytes)",
+        check("K12c at N = 3 (0.2.57's rule, the 0.2.58–0.2.70 default): the restored history composes to exactly the 0.2.57 messages (same request bytes)",
               encodedSorted(withoutStubs(composed(restored))) == encodedSorted(legacy))
         check("K12d the restored history is on disk; the measurement was cleared first",
               records(diskHistory() ?? []).isEmpty && message(diskHistory() ?? [], "REPLY_A1")?.prunedContextSummary == "FULL_SUMMARY_A1"
               && manager._testLastPromptTokens == nil && usageFile()?["lastPromptTokens"] == nil)
-        // A real request after the restore under the default equals 0.2.57's
+        // A real request after the restore at N = 3 equals 0.2.57's
         // metadata: every rendered note identical.
         var same = true
         for (new, old) in zip(composed(restored), legacy) where await manager._testMetadataNote(new) != (await manager._testMetadataNote(old)) { same = false }
         check("K12e every rendered history note after restore equals the 0.2.57 note", same)
+        // Since 0.2.71 the default (10) shows all five anchors of this history
+        // in full: what upgrading does to a 0.2.57-demoted conversation.
+        let byDefault = PruneSummaryRetention.compose(restored, limit: .defaultValue)
+        check("K12g under the default (\(KeepSummariesLimit.defaultCount)) both restored anchors are shown in full and no pointer remains (five anchors ≤ the default: the identity)",
+              records(byDefault.messages).isEmpty && byDefault.renderKey == PruneSummaryRetention.emptyRenderKey
+              && message(byDefault.messages, "REPLY_A0")?.prunedContextSummary == "FULL_SUMMARY_A0"
+              && message(byDefault.messages, "REPLY_A1")?.prunedContextSummary == "FULL_SUMMARY_A1"
+              && encodedSorted(byDefault.messages) == encodedSorted(restored),
+              "records \(records(byDefault.messages).count)")
 
         // Exact bytes: Unicode, internal CRLF, two trailing LFs, a line that
         // merely starts like a marker inside a sentence.

@@ -361,8 +361,10 @@ extension ConversationManager {
     }
 
     /// The reply (and the setting change) for one `/keepsummaries` command.
+    /// Every mention of the default comes from `KeepSummariesLimit.defaultCount`.
     func keepSummariesReply(argument: String) -> String {
         let current = KeepSummariesSetting.current()
+        let defaultCount = KeepSummariesLimit.defaultCount
         let text = argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         // Legacy pointers the one-time restore could not prove exact can
         // only ever be shown as pointers, whatever the setting.
@@ -372,22 +374,22 @@ extension ConversationManager {
             : ""
         if text.isEmpty {
             return """
-                Past-turn summaries kept in full: \(current) (default: 3).
+                Past-turn summaries kept in full: \(current) (default: \(defaultCount)).
                 Older ones are shown as a one-line pointer to a snapshot with the full text; nothing is deleted.
-                Change it with /keepsummaries <1–50> or /keepsummaries all; /keepsummaries 3 returns to the default.
+                Change it with /keepsummaries <1–50> or /keepsummaries all; /keepsummaries \(defaultCount) returns to the default.
                 \(Self.keepSummariesCostLine)
                 """ + legacyNote
         }
         guard let target = KeepSummariesSetting.parseArgument(text) else {
-            return "Usage: /keepsummaries [1–50|all] (currently \(current); default 3)."
+            return "Usage: /keepsummaries [1–50|all] (currently \(current); default \(defaultCount))."
         }
         // The default always removes the key, before any "already" reply.
         if target == .defaultValue { KeepSummariesSetting.store(target) }
         guard target != current else {
-            return "Past-turn summaries kept in full: already \(target) (default: 3)."
+            return "Past-turn summaries kept in full: already \(target) (default: \(defaultCount))."
         }
         KeepSummariesSetting.store(target)
-        return "✅ Past-turn summaries kept in full: \(target) (default is 3; send /keepsummaries 3 to return to it). Applies from the next request; full texts are kept either way, so you can change it back at any time." + legacyNote
+        return "✅ Past-turn summaries kept in full: \(target) (default is \(defaultCount); send /keepsummaries \(defaultCount) to return to it). Applies from the next request; full texts are kept either way, so you can change it back at any time." + legacyNote
     }
 
     // MARK: - Summarization Context Builder

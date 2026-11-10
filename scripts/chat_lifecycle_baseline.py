@@ -185,7 +185,9 @@ def instrument(tree, cm_defaults=CM_DEFAULTS):
 # /keepsummaries (KEEP_SUMMARIES_PLAN v5 §9): the new setting
 # `ada.keepSummaries` is read and written through one accessor in the new
 # PruneSummaryComposition.swift; redirected like every other access (fixtures
-# never set it, so every scenario composes with the default 3).
+# never set it, so every scenario composes with the default: 3 until 0.2.70,
+# 10 since 0.2.71; no scenario holds more than one summary anchor, so both
+# defaults compose every recorded request identically).
 # gws / WhatsApp removal (DROP_GWS_WHATSAPP_PLAN v3 §4, 2026-10-24): the
 # deleted WhatsAppChannelService.swift took its two accesses with it (the key
 # is DELETED, not set to None); the new RetiredIntegrations.swift reads and

@@ -761,7 +761,7 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__user-context-maintenance-selftest"], capture_output=True, text=True, timeout=900)
     check("user-context maintenance selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
 
-    # Past-turn summary retention (Part B): by default the newest 3
+    # Past-turn summary retention (Part B): by default the newest 10 (3 before 0.2.71)
     # prune-summary anchors are shown in full, older ones as a deterministic
     # one-line snapshot pointer (300-scalar budget, recorded coverage, approx.
     # rule), composed when a request is built (/keepsummaries); the commit

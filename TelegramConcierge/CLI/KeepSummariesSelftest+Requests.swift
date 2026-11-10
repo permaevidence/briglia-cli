@@ -14,17 +14,23 @@ extension RetentionHarness {
         _ = await manager._testAwaitIdle(timeout: 60)
     }
 
-    /// K6 between turns, K16.
+    /// K6 between turns, K16. Two anchors more than the default, so the
+    /// default itself is seen composing pointers.
     func requestSection() async throws {
-        let labels = (0..<6).map { "K\($0)" }
-        let manager = try await freshStubbed(6)
+        let d = KeepSummariesLimit.defaultCount
+        let anchors = d + 2
+        let labels = (0..<anchors).map { "K\($0)" }
+        let manager = try await freshStubbed(anchors)
+        // This row starts from the default: drop the mechanics N = 3 that
+        // freshStubbed → resetState() stored.
+        UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
         let seeded = manager._testMessages
         let before = try Data(contentsOf: historyURL)
         server.router = { request in (RetentionHarness.chat("ok", prompt: 1_000), 0) }
         defer { server.router = nil }
         var counts: [Int] = []
         var pointerLines: [Int] = []
-        for limit in [nil, KeepSummariesLimit.all, .count(1), .count(5), .count(3)] as [KeepSummariesLimit?] {
+        for limit in [nil, KeepSummariesLimit.all, .count(1), .count(5), .count(3), .defaultValue] as [KeepSummariesLimit?] {
             if let limit { KeepSummariesSetting.store(limit) }
             server.clear()
             await runTurn(manager, "turn with \(limit?.description ?? "default")")
@@ -32,8 +38,10 @@ extension RetentionHarness {
             counts.append(fullCount(body, labels: labels))
             pointerLines.append(Self.occurrences(PruneSummaryRetention.wrapperPrefix, in: body))
         }
-        check("K6a each turn's request shows the newest N in full (default 3, all, 1, 5, back to 3): changes apply from the next request, both ways",
-              counts == [3, 6, 1, 5, 3] && pointerLines == [3, 0, 5, 1, 3], "full \(counts) pointers \(pointerLines)")
+        let keyAbsentAgain = UserDefaults.standard.object(forKey: KeepSummariesSetting.defaultsKey) == nil
+        check("K6a each turn's request shows the newest N in full (default \(d), all, 1, 5, 3, back to the default) over \(anchors) anchors: changes apply from the next request, both ways",
+              counts == [d, anchors, 1, 5, 3, d] && pointerLines == [anchors - d, 0, anchors - 1, anchors - 5, anchors - 3, anchors - d]
+              && keyAbsentAgain, "full \(counts) pointers \(pointerLines) key absent \(keyAbsentAgain)")
         let disk = diskHistory() ?? []
         let summaries = disk.filter(PruneSummaryRetention.isFullAnchor).map { $0.prunedContextSummary ?? "" }
         let seededAnchors = seeded.filter(PruneSummaryRetention.isFullAnchor)
@@ -46,7 +54,7 @@ extension RetentionHarness {
         // (the turns only appended).
         let seededDisk = Array(disk.prefix(seeded.count))
         let original = try JSONDecoder().decode([Message].self, from: before)
-        check("K6b the persisted seeded history is byte-identical after five turns with different N",
+        check("K6b the persisted seeded history is byte-identical after six turns with different N",
               encodedSorted(seededDisk) == encodedSorted(Array(original.prefix(seeded.count))))
         UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
     }
@@ -70,7 +78,7 @@ extension RetentionHarness {
         await runTurn(manager, "two rounds")
         server.router = nil
         let bodies = mainBodies()
-        check("K6c N changed between rounds of one turn: round 1 composed with 3, round 2 with all",
+        check("K6c N changed between rounds of one turn: round 1 composed with the stored 3, round 2 with all",
               bodies.count == 2 && fullCount(bodies[0], labels: labels) == 3 && fullCount(bodies[1], labels: labels) == 6,
               "\(bodies.map { fullCount($0, labels: labels) })")
         UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
@@ -90,7 +98,7 @@ extension RetentionHarness {
         server.router = nil
         let body = mainBodies().last ?? ""
         check("K7 a change while a request is composed does not split it: the captured view's limit is the one sent (observed at build time and in the final body; the estimator input is not observed independently)",
-              observed.first == .defaultValue && fullCount(body, labels: labels) == 3 && KeepSummariesSetting.current() == .count(1),
+              observed.first == RetentionHarness.mechanicsLimit && fullCount(body, labels: labels) == 3 && KeepSummariesSetting.current() == .count(1),
               "observed \(observed), full \(fullCount(body, labels: labels))")
         UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
 

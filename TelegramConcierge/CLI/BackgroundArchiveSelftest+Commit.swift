@@ -50,11 +50,12 @@ extension BackgroundArchiveHarness {
         manager._testReplaceMessages(live)
         _ = manager._testSave()
         // /keepsummaries: full summaries stay; their pointers were prepared
-        // during the job and the oldest shows as one under the default 3.
-        let composedLive = PruneSummaryRetention.compose(manager._testMessages, limit: .defaultValue).messages
+        // during the job and the oldest shows as one at N = 3 (explicit: the
+        // default is 10 since 0.2.71 and this batch holds fewer anchors).
+        let composedLive = PruneSummaryRetention.compose(manager._testMessages, limit: .count(3)).messages
         let demoted = composedLive.contains { !$0.demotedPruneSummaries.isEmpty && batch.contains($0.id) }
             && manager._testMessages.contains { $0.prunedContextSummaryStub != nil && batch.contains($0.id) }
-        check("BC1 setup: four prunes inside the batch prepared pointers; the oldest summary shows as one (Part B, /keepsummaries)", demoted)
+        check("BC1 setup: four prunes inside the batch prepared pointers; the oldest summary shows as one at N = 3 (Part B, /keepsummaries)", demoted)
         let summaries = router.summaries
         router.gate.release()
         _ = await waitForJob(manager, "succeeded")

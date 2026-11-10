@@ -24,6 +24,7 @@ BINARY = os.path.join(ROOT, ".build/debug/briglia")
 CM = "<ConversationManager family>"
 COMPOSE = "TelegramConcierge/Services/PruneSummaryComposition.swift"
 RESTORE = "TelegramConcierge/Services/PruneSummaryRestore.swift"
+REGISTRY = "TelegramConcierge/Services/ChatCommandRegistry.swift"
 
 # The v4-style splitter Codex used to show R4-1: split at every header-looking
 # line, no whole-file inventory, no end-marker check.
@@ -72,7 +73,7 @@ BREAKS = [
      "        if backgroundPruneJob != nil { return \"background prune\" }\n",
      "",
      "__background-prune-selftest", "keepsummaries"),
-    ("an Int 3 stored instead of removing the key", COMPOSE,
+    ("the default stored instead of removing the key", COMPOSE,
      "        case .count(KeepSummariesLimit.defaultCount): defaults.removeObject(forKey: defaultsKey)\n",
      "",
      "__keep-summaries-selftest", "command"),
@@ -105,6 +106,31 @@ BREAKS = [
      "            return report // a pending scan stays pending\n",
      "            summaryRetentionScanPending = false; return report\n",
      "__keep-summaries-selftest", "idle"),
+    # 0.2.71: default 10 (owner, 2026-11-10); every mention derived from it.
+    ("0.2.71: the default constant back to 3 (storage rows)", COMPOSE,
+     "    static let defaultCount = 10\n",
+     "    static let defaultCount = 3\n",
+     "__keep-summaries-selftest", "command"),
+    ("0.2.71: the default constant back to 3 (real requests)", COMPOSE,
+     "    static let defaultCount = 10\n",
+     "    static let defaultCount = 3\n",
+     "__keep-summaries-selftest", "requests"),
+    ("0.2.71: the show reply names a literal default 3 again", CM,
+     "                Past-turn summaries kept in full: \\(current) (default: \\(defaultCount)).\n",
+     "                Past-turn summaries kept in full: \\(current) (default: 3).\n",
+     "__keep-summaries-selftest", "command"),
+    ("0.2.71: the usage reply names a literal default 3 again", CM,
+     "            return \"Usage: /keepsummaries [1–50|all] (currently \\(current); default \\(defaultCount)).\"\n",
+     "            return \"Usage: /keepsummaries [1–50|all] (currently \\(current); default 3).\"\n",
+     "__keep-summaries-selftest", "command"),
+    ("0.2.71: the registry names a literal default 3 again", REGISTRY,
+     "default \\(KeepSummariesLimit.defaultCount). Send /keepsummaries \\(KeepSummariesLimit.defaultCount) to return to it.",
+     "default 3. Send /keepsummaries 3 to return to it.",
+     "__keep-summaries-selftest", "command"),
+    ("0.2.71: the reply's cost line drifts from the registry text", CM,
+     "    static let keepSummariesCostLine = \"More summaries = larger context: each is ~1.5–3.5k tokens (10 ≈ 15–35k, 20 ≈ 30–70k).\"",
+     "    static let keepSummariesCostLine = \"More summaries = larger context: each is ~1.3–2.7k tokens (10 ≈ 15–25k, 20 ≈ 30–50k).\"",
+     "__keep-summaries-selftest", "command"),
 ]
 
 INVENTORY_START = "        guard headers.count == header.messages else { return .failure(Refusal(\"boundary count\")) }\n"
@@ -141,7 +167,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--only")
     args = parser.parse_args()
-    originals = {p: open(os.path.join(ROOT, p)).read() for p in cmp.cm_paths(ROOT) + [COMPOSE, RESTORE]}
+    originals = {p: open(os.path.join(ROOT, p)).read() for p in cmp.cm_paths(ROOT) + [COMPOSE, RESTORE, REGISTRY]}
     caught = 0
     cases = [b for b in BREAKS if not args.only or args.only in b[0]]
     try:

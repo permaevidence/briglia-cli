@@ -150,8 +150,9 @@ struct DemotedPruneSummary: Codable, Equatable {
     }
 }
 
-/// Past-turn summary retention (Part B): by default the newest three summary
-/// anchors are shown in full and older ones as a fixed one-line pointer to a
+/// Past-turn summary retention (Part B): by default the newest
+/// `KeepSummariesLimit.defaultCount` summary anchors (10 since 0.2.71; 3
+/// before) are shown in full and older ones as a fixed one-line pointer to a
 /// snapshot (`/keepsummaries`, applied when a request is composed).
 /// Everything here is deterministic and makes no model request.
 enum PruneSummaryRetention {

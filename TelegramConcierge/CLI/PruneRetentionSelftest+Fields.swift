@@ -4,7 +4,7 @@ import Foundation
 extension RetentionHarness {
 
     /// A real prune of four anchors; returns the manager and the oldest
-    /// anchor as a request shows it (composed as a pointer, default 3).
+    /// anchor as a request shows it (composed as a pointer at the mechanics N = 3).
     func demotedFixture(files: [String] = []) async throws -> (ConversationManager, Message) {
         var h = anchoredHistory(3)
         if !files.isEmpty { h[1].prunedContextSummaryCoverage = coverage(at(2026, 9, 1, 9, 0), at(2026, 9, 1, 10, 0), files: files) }

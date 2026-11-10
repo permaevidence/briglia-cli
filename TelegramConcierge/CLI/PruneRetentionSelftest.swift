@@ -91,6 +91,13 @@ final class RetentionHarness {
     /// A fixed device zone so recorded offsets are deterministic.
     let zone = TimeZone(secondsFromGMT: 7200)!
 
+    /// The N the mechanics rows of both batteries run at: 3, the
+    /// 0.2.58–0.2.70 default (and 0.2.57's demotion rule) they were written
+    /// for. Since 0.2.71 the default is 10 (`KeepSummariesLimit.defaultCount`),
+    /// so `resetState()` stores 3 explicitly; rows that test the default
+    /// itself (K3–K6a, K12g, K14c, K17) remove the key first.
+    static let mechanicsLimit = KeepSummariesLimit.count(3)
+
     /// The isolation this run must find (the retention battery's by default;
     /// the /keepsummaries battery passes its own).
     var rootMarker = "briglia-prune-retention-"
@@ -130,6 +137,7 @@ final class RetentionHarness {
         server = try CaptureServer()
         defer { server.stop() }
         try configureProvider()
+        KeepSummariesSetting.store(Self.mechanicsLimit)
         if section("line") { lineGoldenSection(); lineOrderSection(); lineBoundarySection(); lineFuzzSection() }
         if section("coverage") { try await coverageRecordSection(); try await coverageCarriedSection() }
         if section("rule") { try await ruleSection(); try await ruleFailureSection() }
@@ -160,7 +168,9 @@ final class RetentionHarness {
         ConversationManager.usageClearFaultForTesting = nil
         ConversationManager.requestViewObserverForTesting = nil
         PruneSummaryRestore.indexCountForTesting = 0
-        UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
+        // Mechanics rows run at N = 3 (see `mechanicsLimit`): stored, since 3
+        // is no longer the default.
+        KeepSummariesSetting.store(Self.mechanicsLimit)
         ConversationManager.historyWriteFaultForTesting = nil
         ConversationManager.historyPostWriteFaultForTesting = nil
         ConversationManager.beforePruneHistoryWriteForTesting = nil
@@ -284,8 +294,9 @@ final class RetentionHarness {
     }
 
     func records(_ history: [Message]) -> [DemotedPruneSummary] { history.flatMap(\.demotedPruneSummaries) }
-    /// What a request shows (/keepsummaries composition at `limit`, default 3).
-    func composed(_ history: [Message], _ limit: KeepSummariesLimit = .defaultValue) -> [Message] {
+    /// What a request shows (/keepsummaries composition at `limit`; by
+    /// default the mechanics N = 3 that `resetState()` stores).
+    func composed(_ history: [Message], _ limit: KeepSummariesLimit = RetentionHarness.mechanicsLimit) -> [Message] {
         PruneSummaryRetention.compose(history, limit: limit).messages
     }
     func message(_ history: [Message], _ content: String) -> Message? { history.first { $0.content == content } }

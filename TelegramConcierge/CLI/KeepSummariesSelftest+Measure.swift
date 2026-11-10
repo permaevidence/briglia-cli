@@ -14,8 +14,9 @@ extension RetentionHarness {
         var outcomes: [String: (pruned: Bool, user: Int?)] = [:]
         for (name, limit) in [("equal keys", nil), ("composition changed", KeepSummariesLimit.all)] as [(String, KeepSummariesLimit?)] {
             let manager = try await freshStubbed(6) { $0.insert(self.toolTurn("PRUNABLE", at: self.at(2026, 9, 28, 10, 0), issued: [self.at(2026, 9, 28, 9, 30)]), at: $0.count - 1) }
-            // A measurement far over the budget, taken under the default view.
-            let key3 = PruneSummaryRetention.compose(manager._testMessages, limit: .defaultValue).renderKey
+            // A measurement far over the budget, taken under the mechanics
+            // view (N = 3, stored by resetState()).
+            let key3 = PruneSummaryRetention.compose(manager._testMessages, limit: RetentionHarness.mechanicsLimit).renderKey
             manager._testSetPromptMeasurement(5_000_000, key: key3)
             if let limit { KeepSummariesSetting.store(limit) }
             server.router = { request in
@@ -31,7 +32,7 @@ extension RetentionHarness {
         }
         check("K8a equal keys keep today's behaviour: the cached measurement decides (a prune runs) and the user delta is attributed",
               outcomes["equal keys"]?.pruned == true, "\(String(describing: outcomes["equal keys"]))")
-        check("K8b an older anchor's composition changed (default → all): the cached measurement is ignored (estimate, no prune) and no user tokens are attributed",
+        check("K8b an older anchor's composition changed (N = 3 → all): the cached measurement is ignored (estimate, no prune) and no user tokens are attributed",
               outcomes["composition changed"]?.pruned == false && outcomes["composition changed"]?.user == nil,
               "\(String(describing: outcomes["composition changed"]))")
 
@@ -56,7 +57,7 @@ extension RetentionHarness {
 
     /// K8i the fallback estimate is made on the composed view, not on the
     /// canonical history (40 long summaries: in full they exceed the budget,
-    /// composed with the default 3 they do not).
+    /// composed with the mechanics N = 3 they do not).
     func measureEstimateSection() async throws {
         try KeychainHelper.save(key: KeychainHelper.maxContextTokensKey, value: "60000")
         try KeychainHelper.save(key: KeychainHelper.targetContextTokensKey, value: "30000")
@@ -191,7 +192,7 @@ extension RetentionHarness {
         // A saved measurement carries its key; a cleared one carries none.
         resetState()
         let manager = try await freshStubbed(5)
-        let key = PruneSummaryRetention.compose(manager._testMessages, limit: .defaultValue).renderKey
+        let key = PruneSummaryRetention.compose(manager._testMessages, limit: RetentionHarness.mechanicsLimit).renderKey
         manager._testSetPromptMeasurement(1_234, key: key)
         let saved = usageFile()
         manager._testSetPromptMeasurement(nil, key: key)

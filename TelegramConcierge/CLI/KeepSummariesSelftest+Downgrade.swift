@@ -48,8 +48,9 @@ extension RetentionHarness {
                   return PruneArchiveStore.isCompleteSnapshot(stub.record.snapshot)
               })
         let full = { (limit: KeepSummariesLimit) in self.composed(history, limit).filter(PruneSummaryRetention.isFullAnchor).count }
-        check("\(prefix)c composition: all → 7 in full, default → 3 in full", full(.all) == 7 && full(.defaultValue) == 3,
-              "all \(full(.all)) default \(full(.defaultValue))")
+        check("\(prefix)c composition: all → 7 in full, 3 → 3 in full (0.2.57's rule), the default (\(KeepSummariesLimit.defaultCount)) → all 7 in full",
+              full(.all) == 7 && full(.count(3)) == 3 && full(.defaultValue) == min(7, KeepSummariesLimit.defaultCount) && KeepSummariesLimit.defaultCount == 10,
+              "all \(full(.all)) three \(full(.count(3))) default \(full(.defaultValue))")
         check("\(prefix)d the 0.2.57 measurement was durably cleared before the restore was published",
               manager._testLastPromptTokens == nil && usageFile()?["lastPromptTokens"] == nil)
         check("\(prefix)e the committed history on disk equals memory",

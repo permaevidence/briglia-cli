@@ -103,7 +103,8 @@ extension RetentionHarness {
         server = try CaptureServer()
         defer { server.stop() }
         try configureProvider()
-        if section("compose") { composeTableSection(); composeEdgeSection() }
+        KeepSummariesSetting.store(Self.mechanicsLimit)
+        if section("compose") { composeTableSection(); composeEdgeSection(); composeDefaultSection() }
         if section("command") { parsingSection(); try storageSection(); await repliesSection() }
         if section("requests") { try await requestSection(); try await requestViewSection() }
         if section("measure") {
@@ -175,7 +176,14 @@ extension RetentionHarness {
         return !body.contains("[PRUNE SUMMARY") && !body.contains("ACTIVE TURN COMPACTION")
     }
 
-    func fullCount(_ text: String, labels: [String]) -> Int { labels.filter { text.contains("FULL_SUMMARY_" + $0) }.count }
+    /// Labels shown in full in `text`. A label must end where it ends, so
+    /// K1 is not counted inside FULL_SUMMARY_K10 (K6a has twelve anchors).
+    func fullCount(_ text: String, labels: [String]) -> Int {
+        labels.filter { label in
+            text.range(of: "FULL_SUMMARY_" + NSRegularExpression.escapedPattern(for: label) + "(?![0-9A-Za-z_])",
+                       options: .regularExpression) != nil
+        }.count
+    }
 
     func encodedSorted<T: Encodable>(_ value: T) -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]

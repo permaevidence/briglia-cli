@@ -15,7 +15,9 @@ enum KeepSummariesLimit: Equatable, CustomStringConvertible {
     case count(Int)
     case all
 
-    static let defaultCount = 3
+    /// 10 since 0.2.71 (owner, 2026-11-10); 3 in 0.2.58–0.2.70. Every
+    /// user-facing mention of the default is derived from this value.
+    static let defaultCount = 10
     static let maxCount = 50
     static let defaultValue = KeepSummariesLimit.count(defaultCount)
 
@@ -29,7 +31,12 @@ enum KeepSummariesLimit: Equatable, CustomStringConvertible {
 
 /// The persisted `/keepsummaries` setting (`switchDefaults` key
 /// `ada.keepSummaries`): an Int 1…50 or the string "all". Absent means the
-/// default 3; the value 3 is never stored (setting 3 removes the key).
+/// default (`KeepSummariesLimit.defaultCount`); the default is never stored
+/// (setting it removes the key). Stored values are read as they are; the
+/// 0.2.71 default change (3 → 10) migrates nothing. Before 0.2.71 setting 3
+/// removed the key, so a user who had typed /keepsummaries 3 cannot be told
+/// apart from one who never changed it: both now get 10. Since 0.2.71
+/// /keepsummaries 3 stores an Int 3.
 enum KeepSummariesSetting {
     static let defaultsKey = "ada.keepSummaries"
     /// The chat-switch store (`switchDefaults`), read and written only here.
@@ -44,7 +51,7 @@ enum KeepSummariesSetting {
         let first = !invalidLogged
         invalidLogged = true
         logLock.unlock()
-        if first { print("[KeepSummaries] Ignoring an invalid stored /keepsummaries value; using the default 3.") }
+        if first { print("[KeepSummaries] Ignoring an invalid stored /keepsummaries value; using the default \(KeepSummariesLimit.defaultCount).") }
         return .defaultValue
     }
 

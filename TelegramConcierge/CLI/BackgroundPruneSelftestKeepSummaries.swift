@@ -26,7 +26,10 @@ enum BackgroundPruneSelftestKeepSummaries {
     }
 
     @MainActor static func changeDuring(_ h: BackgroundPruneSelftestHarness, seam: String) async {
-        UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
+        // Start from N = 3 (stored: the default is 10 since 0.2.71), so every
+        // seam's change (→ 1, → all, → 2) really changes the composition of
+        // these five anchors; under the default 10 "→ all" would not.
+        KeepSummariesSetting.store(.count(3))
         let manager = await h.freshManager(history: h.prunableHistory())
         do { try withStubbedAnchors(manager) } catch { h.check("K10 [\(seam)] setup", false, "\(error)"); return }
         _ = await h.frozenRunningJob(manager)

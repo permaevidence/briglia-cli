@@ -1,8 +1,9 @@
 import Foundation
 
 /// R1–R9: the three-anchor rule, now applied when a request is composed
-/// (/keepsummaries default 3): every commit keeps the full summaries and
-/// prepares their pointers; the composed view shows the newest three in full.
+/// (/keepsummaries at the mechanics N = 3; the default is 10 since 0.2.71):
+/// every commit keeps the full summaries and prepares their pointers; the
+/// composed view shows the newest three in full.
 extension RetentionHarness {
 
     func fullAnchorContents(_ history: [Message]) -> [String] {
