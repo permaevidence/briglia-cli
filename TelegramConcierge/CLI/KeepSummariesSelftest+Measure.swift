@@ -57,37 +57,46 @@ extension RetentionHarness {
 
     /// K8i the fallback estimate is made on the composed view, not on the
     /// canonical history (40 long summaries: in full they exceed the budget,
-    /// composed with the mechanics N = 3 they do not).
+    /// composed with the mechanics N = 3 they do not), on both pre-request
+    /// paths: the inline prune (`/prunebackground off`; the path the
+    /// "estimate made on the canonical history" break mutates) and the
+    /// background decision (on, the default since 0.2.66). Before 0.2.71 this
+    /// row ran only under the default, so the inline path was not exercised.
     func measureEstimateSection() async throws {
         try KeychainHelper.save(key: KeychainHelper.maxContextTokensKey, value: "60000")
         try KeychainHelper.save(key: KeychainHelper.targetContextTokensKey, value: "30000")
         defer {
             try? KeychainHelper.delete(key: KeychainHelper.maxContextTokensKey)
             try? KeychainHelper.delete(key: KeychainHelper.targetContextTokensKey)
+            UserDefaults.standard.removeObject(forKey: ConversationManager.backgroundPruneDefaultsKey)
         }
-        let manager = try await freshStubbed(0) { h in
-            let long = String(repeating: "summary detail ", count: 400)
-            var anchors: [Message] = []
-            for i in 0..<40 {
-                var a = self.anchor("L\(i)", at: self.at(2026, 8, 1, 0, 0).addingTimeInterval(Double(i) * 3600))
-                a.prunedContextSummary = "FULL_SUMMARY_L\(i) " + long
-                anchors.append(a)
+        for (label, backgroundOn) in [("K8i", false), ("K8i-bg", true)] {
+            let manager = try await freshStubbed(0) { h in
+                let long = String(repeating: "summary detail ", count: 400)
+                var anchors: [Message] = []
+                for i in 0..<40 {
+                    var a = self.anchor("L\(i)", at: self.at(2026, 8, 1, 0, 0).addingTimeInterval(Double(i) * 3600))
+                    a.prunedContextSummary = "FULL_SUMMARY_L\(i) " + long
+                    anchors.append(a)
+                }
+                if let ref = try? PruneArchiveStore.write(messages: anchors, trigger: "manual", removedIDs: anchors.map(\.id),
+                                                          leadNote: PruneSummaryRetention.snapshotLeadNote) {
+                    for i in anchors.indices { anchors[i].prunedContextSummaryStub = PruneSummaryRetention.makeStub(for: anchors, anchor: i, snapshot: ref) }
+                }
+                h.insert(contentsOf: anchors + [self.toolTurn("SMALL", at: self.at(2026, 9, 28, 10, 0), issued: [self.at(2026, 9, 28, 9, 30)])], at: 0)
             }
-            if let ref = try? PruneArchiveStore.write(messages: anchors, trigger: "manual", removedIDs: anchors.map(\.id),
-                                                      leadNote: PruneSummaryRetention.snapshotLeadNote) {
-                for i in anchors.indices { anchors[i].prunedContextSummaryStub = PruneSummaryRetention.makeStub(for: anchors, anchor: i, snapshot: ref) }
+            UserDefaults.standard.set(backgroundOn, forKey: ConversationManager.backgroundPruneDefaultsKey)
+            server.router = { request in
+                let text = String(decoding: request.body, as: UTF8.self)
+                return (text.contains("[PRUNE SUMMARY") ? RetentionHarness.chat("K8I_SUMMARY", prompt: 50) : RetentionHarness.chat("ok", prompt: 1_000), 0)
             }
-            h.insert(contentsOf: anchors + [self.toolTurn("SMALL", at: self.at(2026, 9, 28, 10, 0), issued: [self.at(2026, 9, 28, 9, 30)])], at: 0)
+            server.clear()
+            await runTurn(manager, "\(label) estimate")
+            server.router = nil
+            UserDefaults.standard.removeObject(forKey: ConversationManager.backgroundPruneDefaultsKey)
+            check("\(label) /prunebackground \(backgroundOn ? "on" : "off"), no cached measurement: the pre-request estimate is made on the composed view (no prune; the canonical history would exceed the budget)",
+                  !pruneRequested() && message(manager._testMessages, "REPLY_SMALL")?.toolInteractions.isEmpty == false)
         }
-        server.router = { request in
-            let text = String(decoding: request.body, as: UTF8.self)
-            return (text.contains("[PRUNE SUMMARY") ? RetentionHarness.chat("K8I_SUMMARY", prompt: 50) : RetentionHarness.chat("ok", prompt: 1_000), 0)
-        }
-        server.clear()
-        await runTurn(manager, "K8i estimate")
-        server.router = nil
-        check("K8i no cached measurement: the pre-request estimate is made on the composed view (no prune; the canonical history would exceed the budget)",
-              !pruneRequested() && message(manager._testMessages, "REPLY_SMALL")?.toolInteractions.isEmpty == false)
     }
 
     /// K8 mid-turn, late response, forced final.
