@@ -12,6 +12,7 @@ Generated FROM THE SOURCES so it cannot silently drift:
   * NodeRuntime.swift                         pinned private Node version + hashes
   * Resources/PythonEnv/requirements.lock     the private Python venv (every locked version)
   * ToolchainService.swift installSpecs       Homebrew formulae
+  * PythonRuntime.swift maximumMinor          Homebrew python@3.<max> (macOS, only when no usable Python)
   * UserdataToolchain.swift packages          userdata (apt-sourced) toolchain
   * .github/workflows/*.yml                   pinned GitHub Actions + build containers
 plus a short list of hand-written entries (Node, OS tools, browsers,
@@ -269,6 +270,25 @@ def toolchain_specs():
     return out
 
 
+def homebrew_python():
+    """macOS (owner, 2026-11-10): when no usable Python 3.11–3.<max> exists,
+    a tools install the user starts installs Homebrew's python@3.<max>
+    (PythonRuntime.homebrewPythonFormula, derived from maximumMinor)."""
+    rel = f"{SRC}/Services/PythonRuntime.swift"
+    lo = re.search(r"^\s*static let minimumMinor = (\d+)\s*$", read(rel), re.M)
+    m = re.search(r"^\s*static let maximumMinor = (\d+)\s*$", read(rel), re.M)
+    if not lo or not m:
+        raise InventoryError(f"{rel}: static let minimumMinor / maximumMinor not found")
+    formula = f"python@3.{m.group(1)}"
+    return [entry(
+        id=f"brew:{formula}", group="S3 Homebrew formulae Briglia installs (macOS)", ecosystem="Homebrew",
+        name=formula, version=None, pin="none (brew head at install time)", pin_kind="unpinned", owner=HOST,
+        scope="runtime-host", source=need(rel, "homebrewPythonFormula"), watch="gap",
+        gap=f"installed only by a tools install the user starts, and only when no usable Python 3.{lo.group(1)}–3.{m.group(1)} exists; "
+            "Briglia never upgrades it (report-only, plan D6)",
+        exposure="base interpreter of the private Python venv (the document skills open untrusted files)")]
+
+
 def userdata_toolchain():
     rel = f"{SRC}/Services/UserdataToolchain.swift"
     text = read(rel)
@@ -392,7 +412,7 @@ def hand_written():
 
 
 def generate():
-    comps = (swift_packages() + playwright_tree() + agentmail() + node_runtime() + python_venv() + toolchain_specs()
+    comps = (swift_packages() + playwright_tree() + agentmail() + node_runtime() + python_venv() + toolchain_specs() + homebrew_python()
              + userdata_toolchain() + workflows() + hand_written())
     ids = [c["id"] for c in comps]
     dup = sorted({i for i in ids if ids.count(i) > 1})

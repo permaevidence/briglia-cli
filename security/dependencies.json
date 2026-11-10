@@ -435,6 +435,22 @@
   {
    "converges": "never",
    "ecosystem": "Homebrew",
+   "exposure": "base interpreter of the private Python venv (the document skills open untrusted files)",
+   "gap": "installed only by a tools install the user starts, and only when no usable Python 3.11–3.14 exists; Briglia never upgrades it (report-only, plan D6)",
+   "group": "S3 Homebrew formulae Briglia installs (macOS)",
+   "id": "brew:python@3.14",
+   "name": "python@3.14",
+   "owner": "user-os",
+   "pin": "none (brew head at install time)",
+   "pin_kind": "unpinned",
+   "scope": "runtime-host",
+   "source": "TelegramConcierge/Services/PythonRuntime.swift: homebrewPythonFormula",
+   "version": null,
+   "watch": "gap"
+  },
+  {
+   "converges": "never",
+   "ecosystem": "Homebrew",
    "exposure": "parses untrusted Office documents",
    "gap": "cask; Briglia never upgrades it (report-only)",
    "group": "S3 Homebrew formulae Briglia installs (macOS)",

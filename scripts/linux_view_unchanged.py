@@ -37,9 +37,14 @@ TRUE_ATOMS = {"os(Linux)", "canImport(Glibc)", "canImport(FoundationNetworking)"
 FALSE_ATOMS = {"os(macOS)", "os(iOS)", "os(tvOS)", "os(watchOS)", "os(visionOS)", "os(Windows)", "os(Android)",
                "os(FreeBSD)", "os(OpenBSD)", "os(WASI)", "canImport(Darwin)", "canImport(Musl)", "canImport(WinSDK)",
                "canImport(Android)", "canImport(Bionic)", "false"}
-# Non-Swift files this branch may add or change: none is read by a Linux
-# build or by ci.yml.
-NON_SWIFT_ALLOW = {"scripts/linux_view_unchanged.py", "scripts/python_autoinstall_break_test.py"}
+# Non-Swift files this branch may add or change, each with why it leaves the
+# Linux product unchanged (printed with the result so a reviewer sees them).
+NON_SWIFT_ALLOW = {
+    "scripts/linux_view_unchanged.py": "this check (not run by ci.yml)",
+    "scripts/python_autoinstall_break_test.py": "macOS deliberate breaks (not run by ci.yml)",
+    "scripts/security_inventory.py": "inventory: adds the macOS-only Homebrew python@3.<max> entry",
+    "security/dependencies.json": "inventory output (regenerated; ci.yml checks it is current)",
+}
 
 DIRECTIVE = re.compile(r"^\s*#(if|elseif|else|endif)\b(.*)$")
 
@@ -262,6 +267,10 @@ def main():
     if a.self_test:
         return self_test()
     swift, problems = compare(a.base, a.head, a.worktree)
+    changed_non_swift = sorted(p for p in NON_SWIFT_ALLOW if p in git("diff", "--name-only", a.base, *([] if a.worktree else [a.head])).split()
+                               + (git("ls-files", "--others", "--exclude-standard").split() if a.worktree else []))
+    for p in changed_non_swift:
+        print(f"· allowed non-Swift change: {p} — {NON_SWIFT_ALLOW[p]}")
     for p in problems:
         print("✖ " + p)
     print(f"\nlinux view: {swift} changed Swift file(s) checked against {a.base}; "
