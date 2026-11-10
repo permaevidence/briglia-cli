@@ -74,6 +74,64 @@ extension MenuSelftestContext {
         check("python bootstrap: brew succeeds but the check still can't run → says so (brew link hint), no empty \"Still missing\"",
               plans3.value == 1 && e3.hasPrefix("Homebrew installed \(formula), but the tools check still can\u{2019}t run Python.")
               && e3.contains("brew link \(formula)") && !e3.contains("Still missing"), "plans=\(plans3.value) \(e3)")
+
+        // Codex implementation review r1: the round boundary under
+        // revocation, and a failure inside a multi-job second round.
+        func boundaryWorkflow(_ dir: URL, hold: MenuGate?, second: [SetupJobRunner.Spec]) async -> MenuWorkflow {
+            let w = world()
+            let py = dir.appendingPathComponent("python-installed").path
+            var e = env(w)
+            let checks = MenuCount()
+            e.toolchainStatus = {
+                guard FileManager.default.fileExists(atPath: py) else {
+                    return ToolchainService.DesktopStatus(doctorRan: false, missing: [], libreOffice: true, mandatoryMissing: [])
+                }
+                checks.add(1)
+                if checks.value == 1, let hold { await hold.wait() }   // the check right after the Python job
+                return ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc", "ffmpeg"], libreOffice: true, mandatoryMissing: ["pandoc", "ffmpeg"])
+            }
+            e.quick.toolchainJobs = { status in
+                status.doctorRan ? second
+                    : [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "touch '\(py)'", formula], mode: .detached, timeout: 30,
+                                           label: "brew install \(formula)")]
+            }
+            let m = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
+            m.now = { w.clock }
+            await m.start(); await m.settle()
+            return m
+        }
+        func touchJob(_ path: String, _ label: String) -> SetupJobRunner.Spec {
+            SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "touch '\(path)'"], mode: .detached, timeout: 30, label: label)
+        }
+
+        let dir4 = freshDir("py-bootstrap-revoked")
+        let hold = MenuGate()
+        let second4 = [touchJob(dir4.appendingPathComponent("pandoc").path, "brew install pandoc"),
+                       touchJob(dir4.appendingPathComponent("ffmpeg").path, "brew install ffmpeg")]
+        let m4 = await boundaryWorkflow(dir4, hold: hold, second: second4)
+        _ = await act(m4, ["action": "tools_install"], settle: false)
+        var waited = 0
+        while hold.arrived == 0, waited < 400 {   // parked in the check after the Python job
+            try? await Task.sleep(nanoseconds: 50_000_000); waited += 1
+        }
+        let revoking = Task { @MainActor in await m4.revoke() }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        hold.open()
+        await revoking.value
+        check("python bootstrap: revoked during the check after the Python job → no second-round job starts",
+              hold.arrived == 1 && fm.fileExists(atPath: dir4.appendingPathComponent("python-installed").path)
+              && !fm.fileExists(atPath: dir4.appendingPathComponent("pandoc").path) && !fm.fileExists(atPath: dir4.appendingPathComponent("ffmpeg").path),
+              "\(m4.jobLines)")
+
+        let dir5 = freshDir("py-bootstrap-second-fails")
+        let second5 = [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo no bottle; exit 1"], mode: .detached, timeout: 30, label: "brew install pandoc"),
+                       touchJob(dir5.appendingPathComponent("ffmpeg").path, "brew install ffmpeg")]
+        let m5 = await boundaryWorkflow(dir5, hold: nil, second: second5)
+        _ = await act(m5, ["action": "tools_install"])
+        let e5 = tools(m5)["error"] as? String ?? ""
+        check("python bootstrap: the first of two second-round jobs fails → the other never starts, the failure is shown",
+              !fm.fileExists(atPath: dir5.appendingPathComponent("ffmpeg").path) && e5.contains("brew install pandoc") && tools(m5)["installing"] as? Bool != true,
+              "\(e5) \(m5.jobLines)")
     }
 }
 #endif
