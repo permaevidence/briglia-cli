@@ -272,9 +272,9 @@ BREAKS = [
     ("S1c the bare [REDACTED: prefix refused", "Z.10d a line that only looks like a placeholder is allowed", [(C + "EditProtections.swift",
         "        return placeholders.first { text.contains($0) }", "        return placeholders.first { text.contains($0) } ?? \"[REDACTED:\"")]),
     # Codex round 1 (pre-release fixes), finding 1: service_key_env aliases.
-    ("S1d bash no longer records its service_key_env aliases", "Z.10g a service_key_env alias's placeholder", [(S + "BashTools.swift",
+    ("S1d bash no longer records its service_key_env aliases", "Z.10g a service_key_env alias is a current placeholder", [(S + "BashTools.swift",
         "        RedactionAliases.shared.record(resolution.resolved.keys)\n", "")]),
-    ("S1e the placeholder set ignores recorded aliases", "Z.10g a service_key_env alias's placeholder", [(C + "EditProtections.swift",
+    ("S1e the placeholder set ignores recorded aliases", "Z.10g a service_key_env alias is a current placeholder", [(C + "EditProtections.swift",
         "            .union(BashTools.RedactionAliases.shared.labels)\n", "")]),
     ("S2a grep description names edit_file again", "Z.11 GPT tool list names no tool GPT lacks (gpt/json, web true, deferred true)", [("TelegramConcierge/Models/ToolModels+GPT.swift",
         "        (\"grep\", \"never build edit_file old_string or write_file content from a redacted grep line;\",\n                 \"never copy a redacted grep line into a patch;\"),\n", "")]),
