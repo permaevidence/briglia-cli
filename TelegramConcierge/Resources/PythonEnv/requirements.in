@@ -10,3 +10,7 @@ formulas
 # pymupdf-layout and pymupdf4llm (~460 MB venv), none of which the skills use.
 pymupdf<2
 weasyprint
+# numpy-financial (needed by formulas) is capped below 1.1 (owner decision 2026-11-10): 1.1.0 ships
+# compiled wheels for macOS, Linux x86_64 and Windows only, so Linux aarch64 (Raspberry Pi OS 13,
+# Debian 13 ARM) with Python >= 3.13 could not install the lock; 1.0.0 is pure Python for every version.
+numpy-financial<1.1

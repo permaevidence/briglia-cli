@@ -44,6 +44,11 @@ NON_SWIFT_ALLOW = {
     "scripts/python_autoinstall_break_test.py": "macOS deliberate breaks (not run by ci.yml)",
     "scripts/security_inventory.py": "inventory: adds the macOS-only Homebrew python@3.<max> entry",
     "security/dependencies.json": "inventory output (regenerated; ci.yml checks it is current)",
+    # Owner-approved lock fix (Telegram 8224): deliberately changes what Linux
+    # aarch64 with Python >= 3.13 installs; no Linux code changes.
+    "TelegramConcierge/Resources/PythonEnv/requirements.in": "numpy-financial capped below 1.1 (owner-approved lock fix)",
+    "TelegramConcierge/Resources/PythonEnv/requirements.lock": "regenerated: only numpy-financial and the input-sha256 header change",
+    "scripts/python_lock_wheels.py": "metadata-only lock wheel coverage check (not run by ci.yml)",
 }
 
 DIRECTIVE = re.compile(r"^\s*#(if|elseif|else|endif)\b(.*)$")

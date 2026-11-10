@@ -1,5 +1,5 @@
 # briglia-python-lock v1
-# input-sha256: 545e254a3cd6168539a15094d5093361611d7165f946b815cf2bcc985a7caa56
+# input-sha256: 08b2c57ac04a7ec864599b088151a7382e0c963b15ca713a7c80881290e61342
 # generator: uv 0.13.5
 # command: uv pip compile requirements.in --universal --generate-hashes --only-binary :all: --python-version 3.11 --no-header
 brotli==1.2.1 ; platform_python_implementation == 'CPython' \
@@ -680,21 +680,12 @@ numpy==2.5.4 ; python_full_version >= '3.12' \
     #   formulas
     #   numpy-financial
     #   scipy
-numpy-financial==1.0.0 ; python_full_version < '3.13' \
+numpy-financial==1.0.0 \
     --hash=sha256:bae534b357516f12258862d1f0181d911032d0467f215bfcd1c264b4da579047 \
     --hash=sha256:f84341bc62b2485d5604a73d5fac7e91975b4b9cd5f4a5a9cf608902ea00cb40
-    # via formulas
-numpy-financial==1.1.0 ; python_full_version >= '3.13' \
-    --hash=sha256:199e0e9e716fca0d520c1cdf46a724eeef19715e007f0bb6c75766fe146b2782 \
-    --hash=sha256:1e8bfe8b873d98f5e15b3e7d26bc8f412e89a183b2a8e951bee2d911c0ae6a62 \
-    --hash=sha256:3902ab6a22716da94096e56c057fba6a92cc750c321b6729475be8d8438f6811 \
-    --hash=sha256:40954af654a3c30c7c27fc2b222b10be13c9b91e055a6487fcb0761f45bf8364 \
-    --hash=sha256:45d45578473ff1bc5cebd586c42f7d0821ac5d7d7cd87f7289a58d0a6c9ad71c \
-    --hash=sha256:52c24a0a40dd2ba797c61c9621daf565e80f4b500907e44506835a2dcdaf66dc \
-    --hash=sha256:8e90529704e311edd4c9994886b5d4c5eebbe4d93ee000b96c2df437be8898bc \
-    --hash=sha256:aa3f3b7e0aa5f36a7fbd1dd4e70754b557b41573b83e440b78d2d46959c41b2e \
-    --hash=sha256:ec250a0215805b9629486d725c6d2eef218b280c1125cb85c50120aa0b7c5c99
-    # via formulas
+    # via
+    #   -r requirements.in
+    #   formulas
 openpyxl==3.1.5 \
     --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2 \
     --hash=sha256:cf0e3cf56142039133628b5acffe8ef0c12bc902d2aadd3e0fe5878dc08d1050

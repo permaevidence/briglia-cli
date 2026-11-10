@@ -723,7 +723,7 @@
   {
    "converges": "startup",
    "ecosystem": "PyPI",
-   "exposure": "installed with pip --require-hashes --no-deps --only-binary into ~/.local/share/briglia/runtime/python; used by the document skills on untrusted files; marker python_full_version < '3.13'",
+   "exposure": "installed with pip --require-hashes --no-deps --only-binary into ~/.local/share/briglia/runtime/python; used by the document skills on untrusted files",
    "gap": null,
    "group": "U4 private Python venv (universal hashed lock)",
    "id": "pypi:venv:numpy-financial==1.0.0",
@@ -734,22 +734,6 @@
    "scope": "runtime-managed",
    "source": "TelegramConcierge/Resources/PythonEnv/requirements.lock",
    "version": "1.0.0",
-   "watch": "osv"
-  },
-  {
-   "converges": "startup",
-   "ecosystem": "PyPI",
-   "exposure": "installed with pip --require-hashes --no-deps --only-binary into ~/.local/share/briglia/runtime/python; used by the document skills on untrusted files; marker python_full_version >= '3.13'",
-   "gap": null,
-   "group": "U4 private Python venv (universal hashed lock)",
-   "id": "pypi:venv:numpy-financial==1.1.0",
-   "name": "numpy-financial",
-   "owner": "briglia-private",
-   "pin": "sha256 wheel hashes in the lock",
-   "pin_kind": "exact",
-   "scope": "runtime-managed",
-   "source": "TelegramConcierge/Resources/PythonEnv/requirements.lock",
-   "version": "1.1.0",
    "watch": "osv"
   },
   {
