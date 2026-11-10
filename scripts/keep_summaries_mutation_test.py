@@ -111,10 +111,13 @@ BREAKS = [
      "    static let defaultCount = 10\n",
      "    static let defaultCount = 3\n",
      "__keep-summaries-selftest", "command"),
-    ("0.2.71: the default constant back to 3 (real requests)", COMPOSE,
+    # K6a's real requests derive their expectations from the constant (they
+    # check that requests honour the default, whatever it is), so this
+    # second copy targets the composition rows that pin 10 (K17).
+    ("0.2.71: the default constant back to 3 (composition rows)", COMPOSE,
      "    static let defaultCount = 10\n",
      "    static let defaultCount = 3\n",
-     "__keep-summaries-selftest", "requests"),
+     "__keep-summaries-selftest", "compose"),
     ("0.2.71: the show reply names a literal default 3 again", CM,
      "                Past-turn summaries kept in full: \\(current) (default: \\(defaultCount)).\n",
      "                Past-turn summaries kept in full: \\(current) (default: 3).\n",
