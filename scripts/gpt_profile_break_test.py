@@ -46,7 +46,7 @@ BREAKS = [
         "        guard let slash = trimmed.lastIndex(of: \"/\") else { return trimmed }", "        guard let slash = trimmed.lastIndex(of: \"/\"), false else { return trimmed }")]),
     ("A1d freeform on an unverified route", "R OpenCode Responses → JSON", [(C + "GPTEditing.swift",
         "    static let freeformHosts: Set<String> = [\"openrouter.ai\", \"api.openai.com\"]", "    static let freeformHosts: Set<String> = [\"openrouter.ai\", \"api.openai.com\", \"opencode.ai\"]")]),
-    ("L2 OpenAI-key route not freeform (review L2)", "R OpenAI key (api.openai.com Responses) → freeform", [(C + "GPTEditing.swift",
+    ("OAI1 OpenAI-key route not freeform (review L2)", "R OpenAI key (api.openai.com Responses) → freeform", [(C + "GPTEditing.swift",
         "    static let freeformHosts: Set<String> = [\"openrouter.ai\", \"api.openai.com\"]", "    static let freeformHosts: Set<String> = [\"openrouter.ai\"]")]),
     ("P17 SIWC route not freeform (stage 3)", "R Sign in with ChatGPT route → freeform", [(C + "GPTEditing.swift",
         "        if context.siwc != nil || context.siwcFailure != nil { return .freeformVerified }",

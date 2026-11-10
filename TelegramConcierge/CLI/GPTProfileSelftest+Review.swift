@@ -208,16 +208,19 @@ extension GPTProfileSelftest {
         let s = GPTPatchSerializer()
         let a = GPTPatchSerializer.Ticket(), b = GPTPatchSerializer.Ticket(), c = GPTPatchSerializer.Ticket()
         let gotA = await s.acquire(a)
-        let waitB = Task { await s.acquire(b) }
+        let bDone = SetOnce()
+        let waitB = Task { () -> Bool in let ok = await s.acquire(b); bDone.set(); return ok }
         _ = await waitUntil(5) { s.waitersForTesting == 1 }
         s.cancel(b)
+        let leftAtOnce = await waitUntil(5) { bDone.isSet }
+        s.release(a)          // bounded: a broken cancel would hand b the lock here
         let gotB = await waitB.value
-        s.release(a)
+        if gotB { s.release(b) }
         let gotC = await s.acquire(c)
         let heldWithC = s.isHeldForTesting
         s.release(c)
         t.check("Z.7 a waiter stopped in the queue leaves at once without running; the lock passes on",
-                gotA && !gotB && gotC && heldWithC && !s.isHeldForTesting && s.waitersForTesting == 0)
+                gotA && leftAtOnce && !gotB && gotC && heldWithC && !s.isHeldForTesting && s.waitersForTesting == 0)
         let early = GPTPatchSerializer.Ticket()
         s.cancel(early)
         let gotEarly = await s.acquire(early)
@@ -276,15 +279,20 @@ extension GPTProfileSelftest {
         try? await Task.sleep(nanoseconds: 50_000_000)
         let waitedForZero = !granted.isSet
         o.finish(0)
-        let turn2 = await third.value
+        let turn2 = await waitUntil(5) { granted.isSet }
+        third.cancel()        // bounded: a broken order never leaves this test waiting
+        _ = await third.value
         t.check("Z.8 turns: 0 runs, 1 leaves early, 2 starts only after 0 finished", turn0 && waitedForZero && turn2)
         let o2 = GPTPatchRoundOrder(count: 2)
         _ = await o2.waitForTurn(0)
-        let w = Task { await o2.waitForTurn(1) }
+        let wDone = SetOnce()
+        let w = Task { () -> Bool in let ok = await o2.waitForTurn(1); wDone.set(); return ok }
         try? await Task.sleep(nanoseconds: 50_000_000)
         w.cancel()
+        let turnLeftAtOnce = await waitUntil(5) { wDone.isSet }
+        if !turnLeftAtOnce { o2.finish(0) }
         let cancelled = await w.value
-        t.check("Z.8b a waiting turn whose task is stopped returns at once and does not start", !cancelled)
+        t.check("Z.8b a waiting turn whose task is stopped returns at once and does not start", turnLeftAtOnce && !cancelled)
     }
 
     actor OrderBox {
