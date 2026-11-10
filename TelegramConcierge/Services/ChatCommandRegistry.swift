@@ -57,7 +57,7 @@ enum ChatCommandRegistry {
                     ChatCommand(name: "prunebackground", description: "Prune old tool output in the background while I keep working (on, default), or wait for it (off). Best with a model whose context window is at least threshold + 100k (350k by default); turn it off for smaller models",
                                 usage: "[on|off]", inMenu: false, category: "System"),
                     // }BGPRUNE
-        ChatCommand(name: "keepsummaries", description: "Keep the newest N past-turn summaries in full (1–50, or all); default \(KeepSummariesLimit.defaultCount). Send /keepsummaries \(KeepSummariesLimit.defaultCount) to return to it. Applies from the next request. More summaries = larger context: each is ~1.5–3.5k tokens (10 ≈ 15–35k, 20 ≈ 30–70k)",
+        ChatCommand(name: "keepsummaries", description: "Keep the newest N past-turn summaries in full (1–50, or all); default \(KeepSummariesLimit.defaultCount). Send /keepsummaries \(KeepSummariesLimit.defaultCount) to return to it. Applies from the next request. More summaries = larger context: typically ~1.5–3.5k tokens each (10 ≈ 15–35k, 20 ≈ 30–70k)",
                     usage: "[N|all]", inMenu: false, category: "System"),
         ChatCommand(name: "orprovider", description: "Pin the current OpenRouter model to one upstream host (each model remembers its own), let OpenRouter choose, or return to Briglia's host",
                     usage: "[slug|off|default|remembered|forget <model>]", inMenu: false, category: "Models"),

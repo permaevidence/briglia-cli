@@ -131,7 +131,7 @@ BREAKS = [
      "default 3. Send /keepsummaries 3 to return to it.",
      "__keep-summaries-selftest", "command"),
     ("0.2.71: the reply's cost line drifts from the registry text", CM,
-     "    static let keepSummariesCostLine = \"More summaries = larger context: each is ~1.5–3.5k tokens (10 ≈ 15–35k, 20 ≈ 30–70k).\"",
+     "    static let keepSummariesCostLine = \"More summaries = larger context: typically ~1.5–3.5k tokens each (10 ≈ 15–35k, 20 ≈ 30–70k).\"",
      "    static let keepSummariesCostLine = \"More summaries = larger context: each is ~1.3–2.7k tokens (10 ≈ 15–25k, 20 ≈ 30–50k).\"",
      "__keep-summaries-selftest", "command"),
 ]

@@ -1484,7 +1484,7 @@ class ConversationManager: ObservableObject {
     /// Measured on real past-turn summaries (45 distinct, 2026-11-10, the
     /// estimator's chars/4): p10 ≈ 1.8k, median ≈ 2.9k, p90 ≈ 3.5k tokens.
     /// The command description repeats this text (checked by K5c).
-    static let keepSummariesCostLine = "More summaries = larger context: each is ~1.5–3.5k tokens (10 ≈ 15–35k, 20 ≈ 30–70k)."
+    static let keepSummariesCostLine = "More summaries = larger context: typically ~1.5–3.5k tokens each (10 ≈ 15–35k, 20 ≈ 30–70k)."
 
     /// Limits for the file-description API call made at prune time.
     static let descriptionMaxPDFPages = 10
