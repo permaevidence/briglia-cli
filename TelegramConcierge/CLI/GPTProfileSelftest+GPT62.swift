@@ -9,7 +9,8 @@ import FoundationNetworking
 /// docs/research/GPT_62_PROBE_2026-11-17.md): the freeform grammar tool on
 /// api.openai.com with an API key and on OpenRouter's Responses endpoint
 /// (probed), and on both ChatGPT sign-in routes (same code path as GPT-6.1
-/// Sol; NOT probed for these two models); the JSON form on OpenRouter's chat
+/// Sol; probed on Sign in with ChatGPT that day, NOT on the legacy route);
+/// the JSON form on OpenRouter's chat
 /// route (probed), OpenCode and custom endpoints.
 extension GPTProfileSelftest {
     static let gpt62Models = ["gpt-6.2-sol", "gpt-6.2-astra"]

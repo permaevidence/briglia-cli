@@ -37,11 +37,13 @@ struct ResponsesAdapter {
     /// freeform patch tool, image input, encrypted reasoning replay before
     /// and after a tool call and across turns (a corrupted item is refused
     /// with invalid_encrypted_content), effort low/medium/high/xhigh/max;
-    /// none and minimal rejected with 400 unsupported_value. NOT probed on
-    /// either ChatGPT sign-in route (no usable stored login that day; a
-    /// refresh would have rotated the live assistant's): there the two ids
-    /// rest on OpenAI's statement that both models are available in Codex
-    /// on supported plans (private-docs docs/research/GPT_62_PROBE_2026-11-17.md).
+    /// none and minimal rejected with 400 unsupported_value. Probed the same
+    /// day on Sign in with ChatGPT too (a personal plan, the stored token used
+    /// as stored): the same results, tools and the freeform patch tool inside
+    /// the `briglia` namespace. NOT probed on the legacy ChatGPT route (no
+    /// stored login on the probing Mac); there the two ids rest on OpenAI's
+    /// statement that both models are available in Codex on supported plans
+    /// (private-docs docs/research/GPT_62_PROBE_2026-11-17.md, section 9).
     static let subscriptionModelChoices: [(id: String, label: String)] = [
         ("gpt-6.2-sol", "GPT-6.2 Sol"),
         ("gpt-6.2-astra", "GPT-6.2 Astra"),

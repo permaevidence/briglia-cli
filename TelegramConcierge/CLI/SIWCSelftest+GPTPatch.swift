@@ -121,8 +121,8 @@ extension SIWCSelftest {
                                                     "input": .string("x"), "namespace": .string("evil")])])) == nil)
 
         // 0.2.71: GPT-6.2 Sol and GPT-6.2 Astra on this route take the same
-        // form as GPT-6.1 Sol (the route itself was not probed for them on
-        // 2026-11-17; api.openai.com/v1/responses with an API key was).
+        // form as GPT-6.1 Sol (probed live on this route on 2026-11-17: the
+        // namespaced freeform call, its replay, efforts low…max, none refused).
         for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
             let ctx62 = ProviderExecutionContext.siwcContext(source: source, model: model, effort: "max", lane: .main,
                                                              textOnly: false, nativeToolMedia: false)
