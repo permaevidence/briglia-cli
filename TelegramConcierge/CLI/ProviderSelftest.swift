@@ -1026,12 +1026,42 @@ struct ProviderSelftest: AsyncParsableCommand {
               && ResponsesAdapter.subscriptionModelChoices.contains { $0.id == "gpt-6-luna" })
         // v0.2.44: GPT-6.1 Sol (live-verified 2026-09-30 on the subscription:
         // low…max; none and minimal answer 400) is the NEW-setup default.
-        check("P1b GPT-6.1 Sol takes low…max only (no none/minimal), dated ids too; it is the subscription default and first in the catalog",
+        check("P1b GPT-6.1 Sol takes low…max only (no none/minimal), dated ids too; it stays in the catalog (the default until 0.2.70)",
               ["gpt-6.1-sol", "gpt-6.1-sol-2026-09-27"].allSatisfy {
                   ResponsesAdapter.allowedEfforts(model: $0) == ["low", "medium", "high", "xhigh", "max"]
               }
-              && ResponsesAdapter.subscriptionDefaultModel == "gpt-6.1-sol"
-              && ResponsesAdapter.subscriptionModelChoices.first.map { $0.id == "gpt-6.1-sol" && $0.label == "GPT-6.1 Sol" } == true)
+              && ResponsesAdapter.subscriptionModelChoices.contains { $0.id == "gpt-6.1-sol" && $0.label == "GPT-6.1 Sol" })
+        // 0.2.71: GPT-6.2 Sol and GPT-6.2 Astra (api.openai.com, 2026-11-17:
+        // "Supported values are: 'low', 'medium', 'high', 'xhigh', and
+        // 'max'"; none and minimal answer 400). GPT-6.2 Sol is the NEW-setup
+        // default; GPT-6.2 Astra is selectable.
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            check("P1d \(model) takes low…max only (no none/minimal), a dated id too",
+                  [model, model + "-2026-11-17"].allSatisfy {
+                      ResponsesAdapter.allowedEfforts(model: $0) == ["low", "medium", "high", "xhigh", "max"]
+                  })
+            check("P1d \(model): a stored none/minimal becomes low, low…max are kept, an unknown value is dropped",
+                  ResponsesAdapter.compatibleEffort("none", model: model) == "low"
+                  && ResponsesAdapter.compatibleEffort("minimal", model: model) == "low"
+                  && ["low", "medium", "high", "xhigh", "max"].allSatisfy { ResponsesAdapter.compatibleEffort($0, model: model) == $0 }
+                  && ResponsesAdapter.compatibleEffort("ultra", model: model) == nil)
+            check("P1d \(model): the probe effort is one the model accepts",
+                  ResponsesAdapter.probeEffort(model: model).map { ResponsesAdapter.allowedEfforts(model: model).contains($0) } == true)
+        }
+        check("P1d GPT-6.2 Sol is the subscription default and first in the catalog; GPT-6.2 Astra is second",
+              ResponsesAdapter.subscriptionDefaultModel == "gpt-6.2-sol"
+              && ResponsesAdapter.subscriptionModelChoices.first.map { $0.id == "gpt-6.2-sol" && $0.label == "GPT-6.2 Sol" } == true
+              && ResponsesAdapter.subscriptionModelChoices.dropFirst().first.map { $0.id == "gpt-6.2-astra" && $0.label == "GPT-6.2 Astra" } == true)
+        check("P1d a model that only looks like GPT-6.2 Sol / Astra keeps the common list (no prefix leak)",
+              ["gpt-6.2-solar", "gpt-6.2", "gpt-6.2-astra-pro", "gpt-6.20-sol", "xgpt-6.2-sol"].allSatisfy {
+                  ResponsesAdapter.allowedEfforts(model: $0) == ["none", "minimal", "low", "medium", "high", "xhigh"]
+              })
+        check("P1d every older catalog model keeps its 0.2.70 effort list",
+              ResponsesAdapter.allowedEfforts(model: "gpt-6.1-sol") == ["low", "medium", "high", "xhigh", "max"]
+              && ResponsesAdapter.allowedEfforts(model: "gpt-6-astra") == ["low", "medium", "high", "xhigh", "max"]
+              && ["gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"].allSatisfy {
+                  ResponsesAdapter.allowedEfforts(model: $0) == ["none", "low", "medium", "high", "xhigh", "max"]
+              })
         check("P1c effort carried across a subscription model switch: kept when accepted, none/minimal → low on GPT-6.1 Sol, max → xhigh where there is no max, unknown dropped",
               ResponsesAdapter.compatibleEffort("high", model: "gpt-6.1-sol") == "high"
               && ResponsesAdapter.compatibleEffort("max", model: "gpt-6.1-sol") == "max"
@@ -1415,14 +1445,36 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("S1 /model gpt-6-sol on the subscription with effort 'high': the effort is kept, no effort note",
               backSnap[KeychainHelper.openAICompatibleModelKey] == "gpt-6-sol" && backSnap[KeychainHelper.openAICompatibleReasoningEffortKey] == "high"
               && backSnap[ProviderProfiles.subscriptionEffortKey] == "high" && !backReply.contains("isn't available"), backReply)
+        // 0.2.71: the same repair for GPT-6.2 Sol and GPT-6.2 Astra.
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            try subscriptionSlots(model: "gpt-6-sol", effort: "none")
+            let reply = (await manager.handleTerminalCommand("/model \(model)") ?? []).joined(separator: "\n")
+            let snap = KeychainHelper.loadSnapshot()
+            check("S2 /model \(model) on the subscription with effort 'none': model stored, effort rewritten to 'low' in the runtime slot and the subscription profile, and said so",
+                  snap[KeychainHelper.openAICompatibleModelKey] == model && snap[ProviderProfiles.subscriptionModelKey] == model
+                  && snap[KeychainHelper.openAICompatibleReasoningEffortKey] == "low" && snap[ProviderProfiles.subscriptionEffortKey] == "low"
+                  && reply.contains("Reasoning effort \"none\" isn't available on \(model); set to low."),
+                  "effort=\(snap[KeychainHelper.openAICompatibleReasoningEffortKey] ?? "nil") profile=\(snap[ProviderProfiles.subscriptionEffortKey] ?? "nil") \(reply)")
+            try subscriptionSlots(model: "gpt-6-sol", effort: "max")
+            let keptReply = (await manager.handleTerminalCommand("/model \(model)") ?? []).joined(separator: "\n")
+            let keptSnap = KeychainHelper.loadSnapshot()
+            check("S2 /model \(model) on the subscription with effort 'max': the effort is kept, no effort note",
+                  keptSnap[KeychainHelper.openAICompatibleModelKey] == model && keptSnap[KeychainHelper.openAICompatibleReasoningEffortKey] == "max"
+                  && keptSnap[ProviderProfiles.subscriptionEffortKey] == "max" && !keptReply.contains("isn't available"), keptReply)
+        }
+        try subscriptionSlots(model: "gpt-6-sol", effort: "high")
         // Existing installs keep their model: the new default only fills an
         // unset subscription model (setup, status, sign-in, menu).
-        check("S1 an existing subscription profile keeps its stored model; only an unset one gets the new default GPT-6.1 Sol",
+        check("S1 an existing subscription profile keeps its stored model; only an unset one gets the new default",
               ProviderProfiles.configuredModel(.chatgpt) == "gpt-6-sol"
               && (ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel) == "gpt-6-sol")
+        try subscriptionSlots(model: "gpt-6.1-sol", effort: "high")
+        check("S2 an existing GPT-6.1 Sol profile (the default until 0.2.70) keeps GPT-6.1 Sol and its effort",
+              (ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel) == "gpt-6.1-sol"
+              && KeychainHelper.loadSnapshot()[ProviderProfiles.subscriptionEffortKey] == "high")
         try KeychainHelper.saveBatch([ProviderProfiles.subscriptionModelKey: String?.none])
-        check("S1 with no stored subscription model the default is GPT-6.1 Sol",
-              (ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel) == "gpt-6.1-sol")
+        check("S2 with no stored subscription model the default is GPT-6.2 Sol (0.2.71)",
+              (ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel) == "gpt-6.2-sol")
         return failures
     }
 

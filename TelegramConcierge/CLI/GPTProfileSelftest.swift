@@ -82,6 +82,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         GPTPatchSwitch.storedOverrideForTesting = { nil }
         if t.runs("M") { matcherTests(t) }
         if t.runs("R") { resolutionTests(t) }
+        if t.runs("G") { gpt62Tests(t) }
         if t.runs("U") { surfaceTests(t) }
         if t.runs("P") { await promptTests(t) }
         if t.runs("L") { await leaseTests(t) }
@@ -116,7 +117,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
     static func matcherTests(_ t: CPTest) {
         let positives = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5-codex",
                          "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol-2026-08-01", "gpt-5-pro",
-                         "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-6.1-sol", "gpt-7", "gpt-7.2-nova-mini", "gpt-10",
+                         "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra", "gpt-7", "gpt-7.2-nova-mini", "gpt-10",
                          "gpt-12.3-codex-2027-01-01",
                          "openai/gpt-5.6-luna", "openai/gpt-6-luna:nitro", "openai/gpt-5:online", "opencode/gpt-5.1-codex",
                          "azure/openai/gpt-6-sol", "GPT-6-SOL", "  gpt-6-luna  ", "OpenAI/GPT-5.6-Luna"]

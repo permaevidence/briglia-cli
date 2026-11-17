@@ -495,7 +495,8 @@ final class MenuWorkflow {
         case .chatgpt:
             // 0.2.68 (owner): ChatGPT also offers Maximum (`max`) where the
             // model takes it (ResponsesAdapter.allowedEfforts: GPT-6 Sol /
-            // Luna / Astra, GPT-6.1 Sol, GPT-5.6), on both sign-in routes.
+            // Luna / Astra, GPT-6.1 Sol, GPT-6.2 Sol / Astra, GPT-5.6), on
+            // both sign-in routes.
             // Sent verbatim as `reasoning.effort`, like OpenRouter's D11.
             let allowed = ResponsesAdapter.allowedEfforts(model: model)
             return (base + ["xhigh", "max"]).filter(allowed.contains)

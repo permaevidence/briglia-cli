@@ -36,7 +36,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-MODELS = [{"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "recommended": True}, {"id": "gpt-6-sol", "label": "GPT-6 Sol"}, {"id": "gpt-6-luna", "label": "GPT-6 Luna"},
+MODELS = [{"id": "gpt-6.2-sol", "label": "GPT-6.2 Sol", "recommended": True}, {"id": "gpt-6.2-astra", "label": "GPT-6.2 Astra"},
+          {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol"}, {"id": "gpt-6-sol", "label": "GPT-6 Sol"}, {"id": "gpt-6-luna", "label": "GPT-6 Luna"},
           {"id": "gpt-6-astra", "label": "GPT-6 Astra"}, {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
           {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"}, {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"}]
 TITLES_IT = {"name": "Il tuo nome", "serper": "Ricerca web", "jina": "Lettura pagine web", "openai": "Voce e immagini",
@@ -53,6 +54,8 @@ OR_PRESETS = [("dsflash1017", "deepseek/deepseek-v4.1-flash-1017", "DeepSeek V4.
               ("default", "deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "Together"),
               ("haiku55", "anthropic/claude-haiku-5.5", "Claude Haiku 5.5", "Google Vertex"),
               ("luna", "openai/gpt-6-luna", "GPT-6 Luna", "OpenAI"),
+              ("sol62", "openai/gpt-6.2-sol", "GPT-6.2 Sol", "OpenAI"),
+              ("astra62", "openai/gpt-6.2-astra", "GPT-6.2 Astra", "OpenAI"),
               ("glm53flash", "z-ai/glm-5.3-flash", "GLM 5.3 Flash", "Together")]
 LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Server (local or online)"}
 
@@ -61,7 +64,7 @@ class Fake:
     def __init__(self, platform="macos"):
         self.platform = platform
         self.name = ""
-        self.chatgpt = {"state": "signed_out", "active": False, "model": "gpt-6.1-sol", "effort": "high", "other_provider": None, "login": None}
+        self.chatgpt = {"state": "signed_out", "active": False, "model": "gpt-6.2-sol", "effort": "high", "other_provider": None, "login": None}
         self.telegram = {"configured": False, "chat_id": "", "bot": None, "pending": None}
         self.keys = {"serper": None, "jina": None, "openai": None, "agentmail": None}
         # Free keyless search (KEYLESS_WEB plan A.7), default on.
@@ -406,8 +409,13 @@ def main():
         page.wait_for_selector("text=Sign-in cancelled.")
         f.auto_signin = True
         page.click("text=Sign in with ChatGPT")
-        page.wait_for_selector("text=Briglia thinks with GPT-6.1 Sol", timeout=8000)
+        page.wait_for_selector("text=Briglia thinks with GPT-6.2 Sol", timeout=8000)
         check("browser sign-in completes by polling, no button needed", f.chatgpt["state"] == "signed_in")
+        check("0.2.71: the model list starts with GPT-6.2 Sol (in use) and GPT-6.2 Astra, and the note recommends GPT-6.2 Sol",
+              [page.inner_text(".choices .choice >> nth=%d >> .n" % i) for i in range(3)] == ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-6.1 Sol"]
+              and page.inner_text(".choices .choice >> nth=0 >> .s") == "In use"
+              and page.locator(".choices .choice").count() == 9
+              and page.is_visible("text=Model — GPT-6.2 Sol is recommended. Not every plan includes every model."))
         shot(page, "04-chatgpt-signed-in")
         page.click("text=Continue →")
         page.wait_for_selector("text=Connect Telegram")
@@ -774,8 +782,11 @@ def main():
         check("R4: the selector switches to it", o.active() == "openrouter")
         page.click("[data-edit=openrouter]")
         page.wait_for_selector("#or-presets")
-        check("picker: the five OpenRouter presets in order, each with its host behaviour; the default is selected",
-              page.locator("#or-presets .choice[data-model]").count() == 5
+        check("picker: the seven OpenRouter presets in order, each with its host behaviour; the default is selected",
+              page.locator("#or-presets .choice[data-model]").count() == 7
+              and [page.get_attribute("#or-presets .choice[data-model] >> nth=%d" % i, "data-model") for i in (4, 5)] == ["openai/gpt-6.2-sol", "openai/gpt-6.2-astra"]
+              and "OpenAI, pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=4")
+              and "GPT-6.2 Astra" in page.inner_text("#or-presets .choice[data-model] >> nth=5")
               and page.get_attribute("#or-presets .choice[data-model] >> nth=0", "data-model") == "deepseek/deepseek-v4.1-flash-1017"
               and "sel" in page.get_attribute("#or-presets .choice[data-model] >> nth=0", "class")
               and "Together, pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=0")

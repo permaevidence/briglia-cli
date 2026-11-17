@@ -48,11 +48,12 @@ extension MenuSelftestContext {
                   && ai(wf)["openrouter_default_label"] as? String == "DeepSeek V4.1 Flash 1017"
                   && ai(wf)["openrouter_default_host"] as? String == "Together"
                   && (ai(wf)["openrouter_pin"] as? [String]) == [])
-            check("or-picker: five presets in the owner's order, each saying whether/which host is pinned automatically",
-                  rows.map { $0["id"] as? String ?? "" } == [MenuWorkflow.openRouterDefaultModel, plain, haiku, luna, glm]
+            check("or-picker: seven presets in the owner's order (GPT-6.2 Sol and Astra after GPT-6 Luna since 0.2.71), each saying whether/which host is pinned automatically",
+                  rows.map { $0["id"] as? String ?? "" } == [MenuWorkflow.openRouterDefaultModel, plain, haiku, luna, "openai/gpt-6.2-sol", "openai/gpt-6.2-astra", glm]
                   && MenuWorkflow.openRouterDefaultModel == ds1017
-                  && rows.map { $0["host_state"] as? String ?? "" } == ["auto_will_pin", "auto_will_pin", "auto_will_pin", "auto_will_pin", "auto_will_pin"]
-                  && rows.map { ($0["hosts"] as? [String]) ?? [] } == [["Together"], ["Together"], ["Google Vertex"], ["OpenAI"], ["Together"]], "\(rows)")
+                  && rows.map { $0["label"] as? String ?? "" }[4...5] == ["GPT-6.2 Sol", "GPT-6.2 Astra"]
+                  && rows.map { $0["host_state"] as? String ?? "" } == Array(repeating: "auto_will_pin", count: 7)
+                  && rows.map { ($0["hosts"] as? [String]) ?? [] } == [["Together"], ["Together"], ["Google Vertex"], ["OpenAI"], ["OpenAI"], ["OpenAI"], ["Together"]], "\(rows)")
 
             // 2. First setup → the default preset's host, with the host list and the page's basis.
             let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])

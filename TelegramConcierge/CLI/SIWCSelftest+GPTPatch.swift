@@ -120,6 +120,43 @@ extension SIWCSelftest {
                 (try? SIWCBody.namespaced([.object(["type": .string("custom_tool_call"), "call_id": .string("c"), "name": .string("apply_patch"),
                                                     "input": .string("x"), "namespace": .string("evil")])])) == nil)
 
+        // 0.2.71: GPT-6.2 Sol and GPT-6.2 Astra on this route take the same
+        // form as GPT-6.1 Sol (the route itself was not probed for them on
+        // 2026-11-17; api.openai.com/v1/responses with an API key was).
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let ctx62 = ProviderExecutionContext.siwcContext(source: source, model: model, effort: "max", lane: .main,
+                                                             textOnly: false, nativeToolMedia: false)
+            let run62 = EditingRun.start(ctx62)
+            wire.replies = [.success(completedOutput([customItem(patch, namespace: SIWCEndpoint.namespace)]))]
+            let before62 = wire.count
+            let answer62 = try? await service.generateResponse(messages: [human], imagesDirectory: root, documentsDirectory: root, tools: tools,
+                                                              toolResultMessages: nil, execution: ctx62, lane: .main, editingRun: run62)
+            let body62 = wire.count > before62 ? wire.body(before62) : [:]
+            let inner62 = namespaceTools(body62)
+            c.check("gpt-patch: \(model) on Sign in with ChatGPT: freeform run, model and effort max verbatim, the grammar tool inside the namespace in apply_patch's slot",
+                    run62.config == .gptFreeform && body62["model"]?.responsesString == model
+                    && body62["reasoning"]?.responsesObject?["effort"]?.responsesString == "max"
+                    && inner62.count == tools.count && slot >= 0 && inner62[slot]["type"]?.responsesString == "custom"
+                    && inner62[slot]["format"]?.responsesObject?["definition"]?.responsesString == GPTFreeform.grammar
+                    && inner62.enumerated().allSatisfy { $0.offset == slot || $0.element["type"]?.responsesString == "function" }
+                    && (try? SIWCBody.check(body62)) != nil)
+            if case .toolCalls(_, let calls62, _, _, _)? = answer62 {
+                c.check("gpt-patch: \(model) on Sign in with ChatGPT: a namespaced custom_tool_call decodes as apply_patch",
+                        calls62.first?.function.name == "apply_patch" && calls62.first.flatMap(GPTFreeform.patchInput) == patch)
+            } else { c.check("gpt-patch: \(model) on Sign in with ChatGPT: a namespaced custom_tool_call decodes as apply_patch", false) }
+            let none62 = ProviderExecutionContext.siwcContext(source: source, model: model, effort: "none", lane: .main,
+                                                              textOnly: false, nativeToolMedia: false)
+            let sentBeforeRefusal = wire.count
+            var refusal62 = ""
+            do {
+                _ = try await service.generateResponse(messages: [human], imagesDirectory: root, documentsDirectory: root, tools: tools,
+                                                       toolResultMessages: nil, execution: none62, lane: .main, editingRun: EditingRun.start(none62))
+            } catch { refusal62 = "\(error)" }
+            c.check("gpt-patch: \(model) on Sign in with ChatGPT: effort none is refused before anything is sent",
+                    wire.count == sentBeforeRefusal && !refusal62.isEmpty, refusal62)
+            wire.replies = []
+        }
+
         // §5.6 on SIWC, positive evidence: a streamed grammar refusal →
         // one transition, the same request resent once with apply_patch as a
         // namespaced function; one notice; recorded for this route key.

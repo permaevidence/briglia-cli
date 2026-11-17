@@ -168,6 +168,7 @@ final class ORPinSuite {
         await upgradePass()
         await reviewRound2()
         setupDefault0265()
+        gpt62Presets()
         reset()
     }
 
@@ -606,9 +607,9 @@ final class ORPinSuite {
               && TelegramCommandMenu.encode(.openRouterPreset(key: "nope")) == nil)
         let rows = ConversationManager.openRouterRows(store: orStore(model: dflt))
         let menu = TelegramCommandMenu.modelMenu(catalog: .openrouter(rows), profile: "openrouter", current: dflt)
-        check("L the OpenRouter menu: five preset buttons in order + Other, each naming its host behaviour",
-              menu.rows.count == 6 && menu.rows.prefix(5).map { $0[0].data } == OpenRouterPresets.all.map { "bm1:r:\($0.key)" }
-              && menu.rows[5][0].data == "bm1:m:?" && menu.rows[0][0].label.contains("Together") && menu.rows[1][0].label.contains("chosen by OpenRouter")
+        check("L the OpenRouter menu: seven preset buttons in order + Other, each naming its host behaviour (five until 0.2.70)",
+              menu.rows.count == 8 && menu.rows.prefix(7).map { $0[0].data } == OpenRouterPresets.all.map { "bm1:r:\($0.key)" }
+              && menu.rows[7][0].data == "bm1:m:?" && menu.rows[0][0].label.contains("Together") && menu.rows[1][0].label.contains("chosen by OpenRouter")
               && menu.rows.allSatisfy { $0[0].data.utf8.count <= 64 }, "\(menu.rows.map { $0[0].label })")
     }
 

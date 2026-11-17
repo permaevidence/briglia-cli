@@ -20,7 +20,13 @@ enum ResearchSpend {
     /// endpoints. Hidden reasoning bills as output (already inside
     /// completion/output tokens). Cached input is billed at the full input
     /// rate: erring high is the safe direction for a spend limit.
+    ///
+    /// GPT-6.2 Astra $8 / $40 and GPT-6.2 Sol $2 / $10 (0.2.71): OpenAI's
+    /// pricing page, read 2026-11-17 (cached input $0.40 / $0.10, cache
+    /// writes 1.25x input, the same >272K rule as below).
     static let openAIRates: [(prefix: String, input: Double, output: Double)] = [
+        ("gpt-6.2-astra", 8.0, 40.0),
+        ("gpt-6.2-sol", 2.0, 10.0),
         ("gpt-6-astra", 10.0, 50.0),
         ("gpt-6-sol", 2.0, 10.0),
         ("gpt-6-luna", 0.10, 0.50),

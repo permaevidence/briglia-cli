@@ -533,7 +533,13 @@ final class MenuSelftestContext {
 
         r = await act(wf, ["action": "chatgpt_browser"])
         check("browser sign-in opens the ChatGPT link", ok(r) && w.urlsOpened.first?.hasPrefix("https://auth.example/") == true)
-        check("after sign-in ChatGPT is selected with GPT-6.1 Sol (the new-setup default since v0.2.44) + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6.1-sol", effort: "high", generation: "g1") && done(wf, "ai"))
+        check("after sign-in ChatGPT is selected with GPT-6.2 Sol (the new-setup default since 0.2.71) + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6.2-sol", effort: "high", generation: "g1") && done(wf, "ai"))
+        let offered = ((wf.status()["chatgpt"] as? [String: Any])?["models"] as? [[String: Any]]) ?? []
+        check("the ChatGPT model list starts with GPT-6.2 Sol (the only recommended one) and GPT-6.2 Astra, then the older seven",
+              offered.map { $0["id"] as? String ?? "" } == ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+              && offered.filter { $0["recommended"] as? Bool == true }.map { $0["id"] as? String ?? "" } == ["gpt-6.2-sol"]
+              && offered.first?["label"] as? String == "GPT-6.2 Sol" && offered.dropFirst().first?["label"] as? String == "GPT-6.2 Astra",
+              "\(offered)")
         st = wf.status()
         check("a finished sign-in leaves no login state behind", (st["chatgpt"] as? [String: Any])?["login"] == nil)
 
@@ -936,6 +942,10 @@ final class MenuSelftestContext {
         check("ChatGPT: a model without max offers up to Deepest only; GPT-6.1 Sol/Luna/Astra offer Maximum",
               wf.effortChoices(.chatgpt, model: "o-unknown") == ["low", "medium", "high", "xhigh"]
               && ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"].allSatisfy { wf.effortChoices(.chatgpt, model: $0).last == "max" })
+        check("ChatGPT (0.2.71): GPT-6.2 Sol and GPT-6.2 Astra offer Light to Maximum, exactly the five they accept",
+              ["gpt-6.2-sol", "gpt-6.2-astra"].allSatisfy { wf.effortChoices(.chatgpt, model: $0) == ["low", "medium", "high", "xhigh", "max"] })
+        check("OpenRouter (0.2.71): the two GPT-6.2 presets get the lane's usual levels, all accepted by them (low, medium, high, max)",
+              ["openai/gpt-6.2-sol", "openai/gpt-6.2-astra"].allSatisfy { wf.effortChoices(.openrouter, model: $0) == ["low", "medium", "high", "max"] })
         check("other lanes unchanged: OpenCode/local Responses models still stop at Deepest",
               wf.effortChoices(.opencode, model: "gpt-5.6-luna").last == "xhigh")
         r = await act(wf, ["action": "finish", "what": "stop"])

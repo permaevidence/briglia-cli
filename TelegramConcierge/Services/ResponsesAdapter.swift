@@ -27,7 +27,24 @@ struct ResponsesAdapter {
     /// profiles; an existing profile keeps its stored model. One source for the Telegram /model buttons,
     /// the `briglia subscription` hint and — drift-checked by the
     /// telegram-menu selftest — the two browser pages' model pickers.
+    ///
+    /// GPT-6.2 Sol and GPT-6.2 Astra added 2026-11-17 (0.2.71, owner
+    /// decision; released by OpenAI that day). GPT-6.2 Sol is the default for
+    /// NEW subscription profiles from 0.2.71; an existing profile keeps its
+    /// stored model, effort and route. Probed live that day with an OpenAI
+    /// API key on api.openai.com/v1/responses (the endpoint Sign in with
+    /// ChatGPT also uses) and on OpenRouter: text, function tools, the
+    /// freeform patch tool, image input, encrypted reasoning replay before
+    /// and after a tool call and across turns (a corrupted item is refused
+    /// with invalid_encrypted_content), effort low/medium/high/xhigh/max;
+    /// none and minimal rejected with 400 unsupported_value. NOT probed on
+    /// either ChatGPT sign-in route (no usable stored login that day; a
+    /// refresh would have rotated the live assistant's): there the two ids
+    /// rest on OpenAI's statement that both models are available in Codex
+    /// on supported plans (private-docs docs/research/GPT_62_PROBE_2026-11-17.md).
     static let subscriptionModelChoices: [(id: String, label: String)] = [
+        ("gpt-6.2-sol", "GPT-6.2 Sol"),
+        ("gpt-6.2-astra", "GPT-6.2 Astra"),
         ("gpt-6.1-sol", "GPT-6.1 Sol"),
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6-luna", "GPT-6 Luna"),
@@ -38,13 +55,17 @@ struct ResponsesAdapter {
     ]
 
     /// Default model for a new ChatGPT subscription profile.
-    static let subscriptionDefaultModel = "gpt-6.1-sol"
+    static let subscriptionDefaultModel = "gpt-6.2-sol"
 
     /// Documented model capabilities, separate from Codex subscription settings.
     /// Unknown models retain the common API enum; max is opt-in for documented models.
     static func allowedEfforts(model: String) -> [String] {
-        if model == "gpt-6-astra" || model.hasPrefix("gpt-6-astra-20")
-            || model == "gpt-6.1-sol" || model.hasPrefix("gpt-6.1-sol-20") {
+        // No none/minimal: GPT-6 Astra, GPT-6.1 Sol, and GPT-6.2 Sol / Astra
+        // (api.openai.com 2026-11-17: "Supported values are: 'low',
+        // 'medium', 'high', 'xhigh', and 'max'").
+        if ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra"].contains(where: {
+            model == $0 || model.hasPrefix($0 + "-20")
+        }) {
             return ["low", "medium", "high", "xhigh", "max"]
         }
         if ["gpt-6-sol", "gpt-6-luna", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].contains(where: {

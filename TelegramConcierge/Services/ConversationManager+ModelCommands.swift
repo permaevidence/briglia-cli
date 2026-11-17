@@ -153,7 +153,7 @@ extension ConversationManager {
             }
         }
         // ChatGPT subscription (v0.2.44): the model sets which efforts the
-        // endpoint accepts (GPT-6.1 Sol has no none/minimal), so a stored
+        // endpoint accepts (GPT-6.1 Sol and GPT-6.2 Sol / Astra have no none/minimal), so a stored
         // effort the new model rejects is replaced visibly here instead of
         // failing the next request.
         if ProviderProfiles.activeProfile() == .chatgpt {

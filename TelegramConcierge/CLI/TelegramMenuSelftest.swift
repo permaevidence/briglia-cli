@@ -111,9 +111,30 @@ struct TelegramMenuSelftest: ParsableCommand {
               && taggedMenu.rows.first?.first?.label == "Text Model · text-only"
               && ocMenu.rows.last?.first?.label == "Type a model name…" && ocMenu.text.contains("Current model: kimi-k3"))
         let gptMenu = Menu.modelMenu(catalog: .chatgpt, profile: "chatgpt", current: "gpt-6-astra")
-        check("model menu (ChatGPT): exactly GPT-6.1 Sol, GPT-6 Sol, Luna, Astra, then 5.6 Luna, Terra, Sol, bound to chatgpt + typed button",
-              gptMenu.rows.map { $0.map(\.data) } == [["bm1:m:chatgpt:gpt-6.1-sol"], ["bm1:m:chatgpt:gpt-6-sol"], ["bm1:m:chatgpt:gpt-6-luna"], ["bm1:m:chatgpt:gpt-6-astra"], ["bm1:m:chatgpt:gpt-5.6-luna"], ["bm1:m:chatgpt:gpt-5.6-terra"], ["bm1:m:chatgpt:gpt-5.6-sol"], ["bm1:m:?"]]
-              && gptMenu.rows[0].first?.label == "GPT-6.1 Sol" && gptMenu.rows[3].first?.label == "✓ GPT-6 Astra", "\(gptMenu.rows.map { $0.map(\.label) })")
+        check("model menu (ChatGPT): exactly GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Sol, GPT-6 Sol, Luna, Astra, then 5.6 Luna, Terra, Sol, bound to chatgpt + typed button",
+              gptMenu.rows.map { $0.map(\.data) } == [["bm1:m:chatgpt:gpt-6.2-sol"], ["bm1:m:chatgpt:gpt-6.2-astra"], ["bm1:m:chatgpt:gpt-6.1-sol"], ["bm1:m:chatgpt:gpt-6-sol"], ["bm1:m:chatgpt:gpt-6-luna"], ["bm1:m:chatgpt:gpt-6-astra"], ["bm1:m:chatgpt:gpt-5.6-luna"], ["bm1:m:chatgpt:gpt-5.6-terra"], ["bm1:m:chatgpt:gpt-5.6-sol"], ["bm1:m:?"]]
+              && gptMenu.rows[0].first?.label == "GPT-6.2 Sol" && gptMenu.rows[1].first?.label == "GPT-6.2 Astra"
+              && gptMenu.rows[2].first?.label == "GPT-6.1 Sol" && gptMenu.rows[5].first?.label == "✓ GPT-6 Astra", "\(gptMenu.rows.map { $0.map(\.label) })")
+        // 0.2.71: the two new models' buttons round-trip to the typed
+        // command, and their effort menus offer exactly what they accept.
+        for id in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let data = Menu.encode(.model(profile: "chatgpt", id: id)) ?? ""
+            check("model menu (ChatGPT): the \(id) button round-trips to /model \(id)",
+                  data == "bm1:m:chatgpt:\(id)" && data.utf8.count <= 64
+                  && Menu.decode(data) == .model(profile: "chatgpt", id: id)
+                  && Menu.decode(data).flatMap { Menu.commandText(for: $0) } == "/model \(id)")
+            let ticked = Menu.modelMenu(catalog: .chatgpt, profile: "chatgpt", current: id)
+            check("model menu (ChatGPT): \(id) is ticked when it is the current model, and only it",
+                  ticked.rows.filter { $0.first?.label.hasPrefix("✓ ") == true }.map { $0.first?.data } == [data])
+            let effort = Menu.effortMenu(levels: ResponsesAdapter.allowedEfforts(model: id),
+                                         context: Menu.effortContext(profile: "chatgpt", model: id), current: "high",
+                                         currentDescription: "high", offAllowed: true)
+            let labels = effort.rows.flatMap { $0 }.map(\.label)
+            check("effort menu (\(id)): low, medium, high, xhigh and max are offered; none and minimal are not",
+                  ["low", "medium", "xhigh", "max"].allSatisfy { level in labels.contains { $0 == level || $0 == "✓ " + level } }
+                  && labels.contains("✓ high")
+                  && !labels.contains { $0 == "none" || $0 == "minimal" || $0 == "✓ none" || $0 == "✓ minimal" }, "\(labels)")
+        }
         check("model menu: keeps the typed-command hint for users who prefer typing",
               ocMenu.text.contains("/model <model-id>") && gptMenu.text.contains("/model <model-id>"))
 
@@ -198,8 +219,8 @@ struct TelegramMenuSelftest: ParsableCommand {
         // ---- 8. The ChatGPT list is one source: the browser settings picker
         // must list exactly these ids, in this order, plus "custom".
         let expected = ResponsesAdapter.subscriptionModelChoices.map(\.id)
-        check("chatgpt list: exactly the owner's seven, in order (GPT-6.1 Sol first since v0.2.44)",
-              expected == ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
+        check("chatgpt list: exactly the owner's nine, in order (GPT-6.2 Sol first and GPT-6.2 Astra second since 0.2.71; the older seven unchanged after them)",
+              expected == ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
         if let quickSetup = Bundle.module.resourceURL?.appendingPathComponent("QuickSetup", isDirectory: true) {
             for page in ["settings.html"] {
                 let html = (try? String(contentsOf: quickSetup.appendingPathComponent(page), encoding: .utf8)) ?? ""
@@ -207,6 +228,28 @@ struct TelegramMenuSelftest: ParsableCommand {
                 check("chatgpt list: \(page) picker matches the Swift list (+ custom)",
                       options == expected + ["custom"], "\(options)")
             }
+            // 0.2.71: the settings page computes the effort list itself
+            // (settings.js `subscriptionEfforts`); it must agree with
+            // ResponsesAdapter.allowedEfforts for every catalog model and
+            // for an unknown one.
+            let js = (try? String(contentsOf: quickSetup.appendingPathComponent("settings.js"), encoding: .utf8)) ?? ""
+            let rules = Self.settingsEffortRules(in: js)
+            check("chatgpt efforts: settings.js effort rules are readable (two model rules and the fallback)",
+                  rules.count == 3 && rules.last?.patterns.isEmpty == true, "\(rules.count)")
+            for model in expected + ["gpt-6.2-sol-2026-11-17", "gpt-6.2-astra-2026-11-17", "gpt-9-unknown"] {
+                let page = Self.settingsEfforts(model, rules: rules)
+                check("chatgpt efforts: settings.js offers \(model) exactly the efforts the adapter accepts",
+                      page == ResponsesAdapter.allowedEfforts(model: model), "\(page ?? [])")
+            }
+            // 0.2.71: the menu page's one sentence naming the recommended
+            // model (English and Italian) names the new-setup default.
+            let menuJS = (try? String(contentsOf: quickSetup.appendingPathComponent("menu.js"), encoding: .utf8)) ?? ""
+            let defaultLabel = ResponsesAdapter.subscriptionModelChoices.first { $0.id == ResponsesAdapter.subscriptionDefaultModel }?.label ?? "?"
+            check("chatgpt list: menu.js recommends the new-setup default by name, in English and Italian, and no other model",
+                  menuJS.contains("'Model — \(defaultLabel) is recommended. Not every plan includes every model.'")
+                  && menuJS.contains("'Modello: consigliato \(defaultLabel). Non tutti i piani includono tutti i modelli.'")
+                  && menuJS.components(separatedBy: " is recommended.").count == 2
+                  && menuJS.components(separatedBy: "Modello: consigliato ").count == 2, defaultLabel)
         } else {
             check("chatgpt list: QuickSetup resources reachable", false)
         }
@@ -248,6 +291,40 @@ struct TelegramMenuSelftest: ParsableCommand {
     }
 
     /// Option values of the `subscription-model-choice` <select>, in order.
+    /// The effort rules of settings.js `subscriptionEfforts`, in order: each
+    /// `if (/re/.test(model) || …) return [...]` line, then the final
+    /// `return [...]` (no patterns). JavaScript regex literals of this
+    /// simple shape mean the same to NSRegularExpression.
+    static func settingsEffortRules(in js: String) -> [(patterns: [String], efforts: [String])] {
+        guard let start = js.range(of: "function subscriptionEfforts(model) {"),
+              let end = js.range(of: "\n  }", range: start.upperBound..<js.endIndex) else { return [] }
+        var rules: [(patterns: [String], efforts: [String])] = []
+        for line in js[start.upperBound..<end.lowerBound].split(separator: "\n") {
+            guard let ret = line.range(of: "return ["), let close = line.range(of: "]", range: ret.upperBound..<line.endIndex) else { continue }
+            let efforts = line[ret.upperBound..<close.lowerBound].split(separator: ",")
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " '")) }
+            var patterns: [String] = []
+            var rest = line[line.startIndex..<ret.lowerBound]
+            while let open = rest.range(of: "/^"), let shut = rest.range(of: "$/.test(model)", range: open.upperBound..<rest.endIndex) {
+                patterns.append("^" + rest[open.upperBound..<shut.lowerBound] + "$")
+                rest = rest[shut.upperBound...]
+            }
+            rules.append((patterns, efforts))
+        }
+        return rules
+    }
+
+    static func settingsEfforts(_ model: String, rules: [(patterns: [String], efforts: [String])]) -> [String]? {
+        for rule in rules {
+            if rule.patterns.isEmpty { return rule.efforts }
+            for pattern in rule.patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+                if regex.firstMatch(in: model, range: NSRange(model.startIndex..., in: model)) != nil { return rule.efforts }
+            }
+        }
+        return nil
+    }
+
     static func subscriptionPickerOptions(in html: String) -> [String] {
         guard let start = html.range(of: "id=\"subscription-model-choice\""),
               let end = html.range(of: "</select>", range: start.upperBound..<html.endIndex) else { return [] }

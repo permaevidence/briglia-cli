@@ -32,6 +32,17 @@ enum OpenRouterPresets {
                autoHost: "google-vertex", autoHostName: "Google Vertex"),
         Preset(key: "luna", id: "openai/gpt-6-luna", label: "GPT-6 Luna",
                autoHost: "openai", autoHostName: "OpenAI"),
+        // 0.2.71 (owner, 2026-11-17, the day OpenAI released them). Probed
+        // live that day on OpenRouter's chat route with the OpenAI host
+        // pinned as Briglia pins it (`only: ["openai"]`, no fallbacks) and
+        // unpinned: text, tools, the JSON patch tool, images, reasoning
+        // replay, effort minimal…max (`none` is refused by OpenRouter:
+        // "Reasoning is mandatory for this endpoint"). OpenRouter also lists
+        // Azure and Amazon Bedrock hosts for both; not probed.
+        Preset(key: "sol62", id: "openai/gpt-6.2-sol", label: "GPT-6.2 Sol",
+               autoHost: "openai", autoHostName: "OpenAI"),
+        Preset(key: "astra62", id: "openai/gpt-6.2-astra", label: "GPT-6.2 Astra",
+               autoHost: "openai", autoHostName: "OpenAI"),
         Preset(key: "glm53flash", id: "z-ai/glm-5.3-flash", label: "GLM 5.3 Flash",
                autoHost: "together", autoHostName: "Together"),
     ]
