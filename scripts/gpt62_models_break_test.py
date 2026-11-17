@@ -151,7 +151,10 @@ BREAKS = [
         '        Preset(key: "luna", id: "openai/gpt-6-luna", label: "GPT-6 Luna",', '        Preset(key: "luna6", id: "openai/gpt-6-luna", label: "GPT-6 Luna",')], PIN),
     ("B40 a GPT-6.2 preset becomes the setup default", "W62 the setup default is still the first preset", [(S + "OpenRouterPresets.swift",
         '    static let all: [Preset] = [\n', '    static let all: [Preset] = [\n        Preset(key: "sol62first", id: "openai/gpt-6.2-sol-first", label: "GPT-6.2 Sol", autoHost: "openai", autoHostName: "OpenAI"),\n')], PIN),
-    ("B41 the openai pin covers the Fast tier", "W62 today's listing: the openai pin is served by the standard endpoint only", [(S + "OpenRouterProviderPin.swift",
+    # B41/B42: with service-tier metadata present the tier is read from the
+    # metadata itself, so dropping an alias only shows on a listing WITHOUT
+    # that field (the tag's last segment is then the only tier signal).
+    ("B41 the openai pin covers the Fast tier", "W62 today's listing without tier metadata", [(S + "OpenRouterProviderPin.swift",
         '    static let tierAliases: [String: String] = ["flex": "flex", "priority": "priority", "fast": "priority", "ultrafast": "ultrafast"]',
         '    static let tierAliases: [String: String] = ["flex": "flex"]')], PIN),
     ("B42 the Ultrafast tier is not known as a tier", "W62 today's listing without tier metadata", [(S + "OpenRouterProviderPin.swift",
