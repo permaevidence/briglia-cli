@@ -86,7 +86,7 @@ def inventory():
         ("the private-Node download code changed (evidence anchor gone)", "TelegramConcierge/Services/NodeRuntime.swift",
          "https://nodejs.org/dist/v", "https://example.invalid/v"),
         ("the Node pin changed without regenerating", "TelegramConcierge/Services/NodeRuntime.swift",
-         'static let pinnedVersion = "24.22.1"', 'static let pinnedVersion = "24.22.2"'),
+         'static let pinnedVersion = "24.22.3"', 'static let pinnedVersion = "24.22.4"'),
         ("a Python lock entry changed without regenerating", "TelegramConcierge/Resources/PythonEnv/requirements.lock",
          "\npillow==", "\npillow==0.0.0.dev0+x "),
         ("a new pinned action added to a workflow", ".github/workflows/security-watch.yml",

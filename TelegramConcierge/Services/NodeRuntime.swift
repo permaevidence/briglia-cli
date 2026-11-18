@@ -13,14 +13,14 @@ import Darwin
 /// never written. Fresh installs get the latest patched LTS (the pin below,
 /// gated by scripts/pin_gate.py at every release).
 enum NodeRuntime {
-    static let pinnedVersion = "24.22.1"
+    static let pinnedVersion = "24.22.3"
     /// nodejs.org `node-v<ver>-<platform>.tar.gz` SHA-256 (Briglia's own
     /// record; SHASUMS256.txt is never fetched).
     static let pinnedArchiveSHA256: [String: String] = [
-        "darwin-arm64": "89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7",
-        "darwin-x64":   "d132557e7ee2b85af08b0c8c34338e65c6430f2238d01f727728ef42dc83b035",
-        "linux-arm64":  "33c37be234ba8bee041961047b19160f4d7d0f164e8e246f78bdd10feff148b3",
-        "linux-x64":    "eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c",
+        "darwin-arm64": "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd",
+        "darwin-x64":   "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7",
+        "linux-arm64":  "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",
+        "linux-x64":    "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2",
     ]
 
     static var platform: String {

@@ -553,11 +553,11 @@
    "id": "runtime:node",
    "name": "node",
    "owner": "briglia-private",
-   "pin": "compiled archive SHA-256 per platform: darwin-arm64=89c682593d76, darwin-x64=d132557e7ee2, linux-arm64=33c37be234ba, linux-x64=eb6728e77c57",
+   "pin": "compiled archive SHA-256 per platform: darwin-arm64=ff6e17d4874b, darwin-x64=977614af0504, linux-arm64=261af2af250d, linux-x64=061ec3e30621",
    "pin_kind": "exact",
    "scope": "runtime-managed",
    "source": "TelegramConcierge/Services/NodeRuntime.swift",
-   "version": "24.22.1",
+   "version": "24.22.3",
    "watch": "node-releases"
   },
   {

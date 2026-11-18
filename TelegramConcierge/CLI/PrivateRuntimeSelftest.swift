@@ -618,7 +618,7 @@ final class RuntimeHarness {
             case "node":
                 setenv("BRIGLIA_NODE_TEST_ARCHIVE", scratch.appendingPathComponent("no-such-node.tar.gz").path, 1)
                 setenv("BRIGLIA_NODE_TEST_SHA256", String(repeating: "2", count: 64), 1)
-                setenv("BRIGLIA_NODE_TEST_VERSION", "24.22.1", 1)
+                setenv("BRIGLIA_NODE_TEST_VERSION", "24.22.3", 1)
                 if let np = NodeRuntime.runtimePin { _ = await PrivateRuntimeEngine.converge(NodeRuntime.spec(pin: np), trigger: .explicit) }
                 unsetenv("BRIGLIA_NODE_TEST_ARCHIVE"); unsetenv("BRIGLIA_NODE_TEST_SHA256"); unsetenv("BRIGLIA_NODE_TEST_VERSION")
             case "generic update":
@@ -687,10 +687,10 @@ final class RuntimeHarness {
 
     func nodeSelection() async throws {
         resetRuntime()
-        let fx = try nodeFixture("24.22.1")
+        let fx = try nodeFixture("24.22.3")
         setenv("BRIGLIA_NODE_TEST_ARCHIVE", fx.path, 1)
         setenv("BRIGLIA_NODE_TEST_SHA256", fx.sha, 1)
-        setenv("BRIGLIA_NODE_TEST_VERSION", "24.22.1", 1)
+        setenv("BRIGLIA_NODE_TEST_VERSION", "24.22.3", 1)
         // Legacy ~/.local/node (an older Briglia's copy) that must never change.
         let legacy = URL(fileURLWithPath: home + "/.local/node/bin", isDirectory: true)
         try fm.createDirectory(at: legacy, withIntermediateDirectories: true)
@@ -708,8 +708,8 @@ final class RuntimeHarness {
         let older = try sharedNode("22.20.0")
         setenv("BRIGLIA_NODE_TEST_SHARED_DIRS", older + ":" + legacy.path, 1)
         let r2 = await NodeRuntime.select()
-        check("only Nodes older than the pin (22.x, the legacy copy) → private 24.22.1 installed and selected",
-              r2.providerClass == "private-exact" && r2.version == "24.22.1" && receipt(.node)?.verifiedRecord?.version == "24.22.1", "\(r2)")
+        check("only Nodes older than the pin (22.x, the legacy copy) → private 24.22.3 installed and selected",
+              r2.providerClass == "private-exact" && r2.version == "24.22.3" && receipt(.node)?.verifiedRecord?.version == "24.22.3", "\(r2)")
         check("…fallback shims point at the concrete verified runtime/node/v/<name>/bin (never through current)",
               RuntimeFS.readLink(RuntimePaths.fallbackBinDir.appendingPathComponent("node"))
                 == receipt(.node)?.verifiedRecord.map { RuntimePaths.dir(.node).appendingPathComponent($0.directory).appendingPathComponent("bin/node").path })
