@@ -645,7 +645,7 @@ enum GPTShellRead {
                 let a = w[i]; i += 1
                 if !endOfOptions && a == "--" { endOfOptions = true; continue }
                 if !endOfOptions && a == "-n" { continue }
-                if !endOfOptions && a.hasPrefix("-") { return nil }
+                if !endOfOptions && a.unicodeScalars.first == "-" { return nil }
                 operands.append(a)
             }
         case "nl":
@@ -653,7 +653,7 @@ enum GPTShellRead {
                 let a = w[i]; i += 1
                 if !endOfOptions && a == "--" { endOfOptions = true; continue }
                 if !endOfOptions && a == "-ba" { continue }
-                if !endOfOptions && a.hasPrefix("-") { return nil }
+                if !endOfOptions && a.unicodeScalars.first == "-" { return nil }
                 operands.append(a)
             }
         case "head", "tail":
@@ -664,8 +664,8 @@ enum GPTShellRead {
                     guard i < w.count, positiveInt(w[i]) else { return nil }
                     i += 1; continue
                 }
-                if !endOfOptions && a.hasPrefix("-") {
-                    guard positiveInt(String(a.dropFirst())) else { return nil }
+                if !endOfOptions && a.unicodeScalars.first == "-" {
+                    guard positiveInt(String(String.UnicodeScalarView(a.unicodeScalars.dropFirst()))) else { return nil }
                     continue
                 }
                 operands.append(a)
@@ -694,7 +694,7 @@ enum GPTShellRead {
         // Foundation for it.
         guard !cmd.isEmpty, !cmd.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else { return nil }
         // Pipes split stages; no `||` (rejected by `words` anyway).
-        let stages = cmd.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let stages = cmd.unicodeScalars.split(separator: "|", omittingEmptySubsequences: false).map { String(String.UnicodeScalarView($0)) }
         guard let first = stages.first, let firstWords = words(first) else { return nil }
         guard let operand = readerOperand(firstWords) else { return nil }
         for stage in stages.dropFirst() {
@@ -764,14 +764,17 @@ enum GPTShellIntercept {
         s = s.dropFirst(2).drop(while: { $0 == " " })
         var quoted = false
         var word = ""
-        if let q = s.first, q == "'" || q == "\"" {
-            s = s.dropFirst()
-            guard let end = s.firstIndex(of: q) else { return nil }
-            word = String(s[..<end]); s = s[s.index(after: end)...]
+        // The delimiter word on Unicode scalars too (a closing quote glued to
+        // a combining mark must not be stepped over).
+        let u = s.unicodeScalars
+        if let q = u.first, q == "'" || q == "\"" {
+            let open = u.index(after: u.startIndex)
+            guard let end = u[open...].firstIndex(of: q) else { return nil }
+            word = String(String.UnicodeScalarView(u[open..<end])); s = Substring(u[u.index(after: end)...])
             quoted = true
         } else {
-            let w = s.prefix { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
-            word = String(w); s = s.dropFirst(w.count)
+            let end = u.firstIndex(where: { !($0.isASCII && ($0.properties.isAlphabetic || ("0"..."9").contains($0) || $0 == "_")) }) ?? u.endIndex
+            word = String(String.UnicodeScalarView(u[..<end])); s = Substring(u[end...])
         }
         guard let firstScalar = word.unicodeScalars.first,
               (firstScalar.properties.isAlphabetic && firstScalar.isASCII) || firstScalar == "_",
@@ -824,18 +827,26 @@ enum GPTShellIntercept {
 
     /// One absolute path word: unquoted (no metacharacters) or single /
     /// double quoted without expansions.
+    ///
+    /// Quote boundaries and word ends are found on Unicode scalars: a quote
+    /// or a space followed by a combining mark is ONE Character, and a
+    /// Character search would step over it (Codex 0.2.71 Linux review P2:
+    /// `cd '/tmp/'\u{301}; echo SIDE; : '\u{301}' && apply_patch …` was taken
+    /// for one quoted path and its statements dropped).
     static func parsePathWord(_ s: Substring) -> (String, Substring)? {
-        guard let first = s.first else { return nil }
+        let u = s.unicodeScalars
+        guard let first = u.first else { return nil }
         if first == "'" || first == "\"" {
-            let rest = s.dropFirst()
-            guard let end = rest.firstIndex(of: first) else { return nil }
-            let path = String(rest[..<end])
+            let open = u.index(after: u.startIndex)
+            guard let end = u[open...].firstIndex(of: first) else { return nil }
+            let path = String(String.UnicodeScalarView(u[open..<end]))
             if first == "\"" && containsScalar(path, "$`\\") { return nil }
-            return (path, rest[rest.index(after: end)...])
+            return (path, Substring(u[u.index(after: end)...]))
         }
-        let word = s.prefix { $0 != " " }
-        guard !containsScalar(String(word), "'\"\\$`;&|<>(){}*?[]~!#") else { return nil }
-        return (String(word), s.dropFirst(word.count))
+        let end = u.firstIndex(of: " ") ?? u.endIndex
+        let word = String(String.UnicodeScalarView(u[..<end]))
+        guard !containsScalar(word, "'\"\\$`;&|<>(){}*?[]~!#") else { return nil }
+        return (word, Substring(u[end...]))
     }
 
     /// The effective call (§8): `apply_patch {"input": body}` with the

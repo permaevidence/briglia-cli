@@ -316,10 +316,22 @@ BREAKS = [
         "            if first == \"\\\"\" && containsScalar(path, \"$`\\\\\") { return nil }",
         "            if first == \"\\\"\" && (path.contains(\"$\") || path.contains(\"`\") || path.contains(\"\\\\\")) { return nil }")]),
     ("X4 unquoted cd path check back on Characters", "I does not intercept: cd unquoted path with $ + combining mark", [(S + "ToolExecutor+GPTPatch.swift",
-        "        guard !containsScalar(String(word), \"'\\\"\\\\$`;&|<>(){}*?[]~!#\") else { return nil }",
+        "        guard !containsScalar(word, \"'\\\"\\\\$`;&|<>(){}*?[]~!#\") else { return nil }",
         "        guard !word.contains(where: { \"'\\\"\\\\$`;&|<>(){}*?[]~!#\".contains($0) }) else { return nil }")]),
     ("X5 heredoc CR not stripped before the delimiter compare", "I does not intercept: CRLF: early delimiter then statements", [(S + "ToolExecutor+GPTPatch.swift",
         "            if line.unicodeScalars.last == \"\\r\" { line.unicodeScalars.removeLast() }\n", "")]),
+]
+# Codex 0.2.71 Linux review P2: quote boundaries, word ends and option dashes on scalars.
+BREAKS += [
+    ("X7 quoted cd path closing quote found by Character search", "I does not intercept: cd '…' + combining mark, then statements", [(S + "ToolExecutor+GPTPatch.swift",
+        "            guard let end = u[open...].firstIndex(of: first) else { return nil }\n            let path = String(String.UnicodeScalarView(u[open..<end]))",
+        "            guard let end = s.dropFirst().firstIndex(of: Character(first)) else { return nil }\n            let path = String(String.UnicodeScalarView(u[open..<end]))")]),
+    ("X8 unquoted cd path ends at a Character space", "I does not intercept: cd unquoted path, space + combining mark", [(S + "ToolExecutor+GPTPatch.swift",
+        "        let end = u.firstIndex(of: \" \") ?? u.endIndex\n        let word = String(String.UnicodeScalarView(u[..<end]))",
+        "        let end = s.firstIndex(of: \" \") ?? s.endIndex\n        let word = String(String.UnicodeScalarView(u[..<end]))")]),
+    ("X9 cat option dash checked as a Character", "H not recognised: cat -\u0301opt.txt", [(S + "ToolExecutor+GPTPatch.swift",
+        "                if !endOfOptions && a == \"-n\" { continue }\n                if !endOfOptions && a.unicodeScalars.first == \"-\" { return nil }",
+        "                if !endOfOptions && a == \"-n\" { continue }\n                if !endOfOptions && a.hasPrefix(\"-\") { return nil }")]),
 ]
 # Caught only on macOS: there `String.contains("\\n")` is Character-based and
 # misses the "\\n" inside a "\\r\\n" Character (Linux Foundation finds it).

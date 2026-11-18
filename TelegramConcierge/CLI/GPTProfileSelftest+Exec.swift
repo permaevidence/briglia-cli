@@ -167,6 +167,13 @@ extension GPTProfileSelftest {
             ("unquoted body with backtick + combining mark", "apply_patch <<EOF\n\(body)\n+`\u{301}id`\nEOF"),
             ("cd \"…$+combining mark…\" &&", "cd \"/tmp/$\u{301}x\" && apply_patch <<'EOF'\n\(body)\nEOF"),
             ("cd unquoted path with $ + combining mark", "cd /tmp/$\u{301}x && apply_patch <<'EOF'\n\(body)\nEOF"),
+            // Codex 0.2.71 Linux review P2: quote boundaries and word ends on
+            // scalars; a quote or a space glued to a combining mark must not
+            // hide real shell statements.
+            ("cd '…' + combining mark, then statements", "cd '/tmp/'\u{301}; echo SIDE; : '\u{301}' && apply_patch <<'EOF'\n\(body)\nEOF"),
+            ("cd \"…\" + combining mark, then statements", "cd \"/tmp/\"\u{301}; echo SIDE; : \"\u{301}\" && apply_patch <<'EOF'\n\(body)\nEOF"),
+            ("cd unquoted path, space + combining mark", "cd /tmp \u{301}x && apply_patch <<'EOF'\n\(body)\nEOF"),
+            ("heredoc delimiter quote + combining mark", "apply_patch <<'EOF'\u{301}\n\(body)\nEOF'\nEOF"),
         ]
         for (label, command) in refused {
             t.check("I does not intercept: \(label)", GPTShellIntercept.patchBody(command: command) == nil, command)
@@ -325,7 +332,7 @@ extension GPTProfileSelftest {
     static func shellReadTests(_ t: CPTest) {
         let d = t.dir("shell")
         t.write(d + "/a.txt", "a\nb\n"); t.write(d + "/b.txt", "b\n"); t.write(d + "/sp ace.txt", "s\n"); t.write(d + "/e.txt", "")
-        t.write(d + "/cr\r\nlf.txt", "x\n")
+        t.write(d + "/cr\r\nlf.txt", "x\n"); t.write(d + "/-\u{301}opt.txt", "x\n")
         try? FileManager.default.createDirectory(atPath: d + "/dir", withIntermediateDirectories: true)
         symlink(d + "/a.txt", d + "/ln.txt")
         let a = d + "/a.txt"
@@ -353,6 +360,8 @@ extension GPTProfileSelftest {
             ("cat", nil), ("", nil), ("head -n", nil), ("nl -b a \(a)", nil),
             // 0.2.71 Linux audit: a CRLF Character still makes the command multi-line.
             ("cat \(a)\r\ncat \(a)", nil), ("cat \(d)/cr\r\nlf.txt", nil), ("cat \(a)\rcat \(a)", nil),
+            // Options and pipes on scalars: a "-" or "|" glued to a combining mark.
+            ("cat -\u{301}opt.txt", d), ("cat \(a) |\u{301} head -n 5", nil), ("head -\u{301}5 \(a)", nil),
         ]
         for (command, workdir) in no {
             let shown = command.replacingOccurrences(of: d, with: "D").unicodeScalars
