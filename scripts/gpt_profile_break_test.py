@@ -94,7 +94,7 @@ BREAKS = [
     ("P22 heredoc with trailing command intercepted", "I does not intercept: trailing command (P22)", [(S + "ToolExecutor+GPTPatch.swift",
         "        guard after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }\n", "")]),
     ("S5 unquoted heredoc with expansions intercepted", "I does not intercept: unquoted body with $", [(S + "ToolExecutor+GPTPatch.swift",
-        "        if !quoted, bodyText.contains(\"$\")", "        if false, bodyText.contains(\"$\")")]),
+        "        if !quoted, containsScalar(bodyText,", "        if false, containsScalar(bodyText,")]),
     ("S6 standard bash intercepted", "I a standard-stamped bash call is never intercepted", [(S + "ToolExecutor+GPTPatch.swift",
         "        guard call.function.name == \"bash\", call.editing?.isGPT == true,", "        guard call.function.name == \"bash\",")]),
     ("S7 evidence published before delivery", "K no GPT record until the result is committed", [(S + "ToolExecutor+Filesystem.swift",
@@ -307,7 +307,31 @@ BREAKS = [
     ("B2 legacy refusal page promises a paste-back", "legacy listener: a refusal is a readable page", [(S + "SubscriptionBrowserLogin.swift",
         "    static let callbackPolicy = QuickSetupHTTPServer.Policy.legacyOAuthCallback",
         "    static let callbackPolicy = QuickSetupHTTPServer.Policy.oauthCallback")], SUB_RUN),
+    # 0.2.71 Linux audit: the shell checks work on Unicode scalars ("\r\n" is
+    # ONE Character, and Foundation's String search differs by platform).
+    ("X2 heredoc body expansion check back on Characters", "I does not intercept: unquoted body with $ + combining mark", [(S + "ToolExecutor+GPTPatch.swift",
+        "        if !quoted, containsScalar(bodyText, \"$`\\\\\") { return nil }",
+        "        if !quoted, bodyText.contains(\"$\") || bodyText.contains(\"`\") || bodyText.contains(\"\\\\\") { return nil }")]),
+    ("X3 double-quoted cd path check back on Characters", "I does not intercept: cd \"…$+combining mark…\" &&", [(S + "ToolExecutor+GPTPatch.swift",
+        "            if first == \"\\\"\" && containsScalar(path, \"$`\\\\\") { return nil }",
+        "            if first == \"\\\"\" && (path.contains(\"$\") || path.contains(\"`\") || path.contains(\"\\\\\")) { return nil }")]),
+    ("X4 unquoted cd path check back on Characters", "I does not intercept: cd unquoted path with $ + combining mark", [(S + "ToolExecutor+GPTPatch.swift",
+        "        guard !containsScalar(String(word), \"'\\\"\\\\$`;&|<>(){}*?[]~!#\") else { return nil }",
+        "        guard !word.contains(where: { \"'\\\"\\\\$`;&|<>(){}*?[]~!#\".contains($0) }) else { return nil }")]),
+    ("X5 heredoc CR not stripped before the delimiter compare", "I does not intercept: CRLF: early delimiter then statements", [(S + "ToolExecutor+GPTPatch.swift",
+        "            if line.unicodeScalars.last == \"\\r\" { line.unicodeScalars.removeLast() }\n", "")]),
 ]
+# Caught only on macOS: there `String.contains("\\n")` is Character-based and
+# misses the "\\n" inside a "\\r\\n" Character (Linux Foundation finds it).
+if sys.platform == "darwin":
+    BREAKS.append(("X1 shell-read multi-line guard back on Characters", "H not recognised: cat D/cr␍⏎lf.txt", [(S + "ToolExecutor+GPTPatch.swift",
+        "        guard !cmd.isEmpty, !cmd.unicodeScalars.contains(where: { $0 == \"\\n\" || $0 == \"\\r\" }) else { return nil }",
+        "        guard !cmd.isEmpty, !cmd.contains(\"\\n\"), !cmd.contains(\"\\r\") else { return nil }")]))
+# Caught only where Foundation's components(separatedBy:) does not split a
+# "\r\n" Character (Linux); on macOS the old split happens to work.
+if sys.platform.startswith("linux"):
+    BREAKS.append(("X6 heredoc lines split by Foundation again", "I intercepts CRLF lines", [(S + "ToolExecutor+GPTPatch.swift",
+        "        let lines = scalarLines(String(s))", "        let lines = String(s).components(separatedBy: \"\\n\")")]))
 
 
 def run(cmd, cwd, timeout=None, env=None):

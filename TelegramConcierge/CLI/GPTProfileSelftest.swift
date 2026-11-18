@@ -215,8 +215,17 @@ struct GPTProfileSelftest: AsyncParsableCommand {
     }
 
     /// SHA-256 of today's standard `filesystemTools` (sorted-key JSON,
-    /// legacy preference off), recorded at wip/gpt-patch on top of v0.2.70.
+    /// legacy preference off). One value per platform: the bash tools'
+    /// descriptions name the platform's login shell (`PlatformShell.path`,
+    /// a compile-time constant: /bin/zsh on macOS, /bin/bash elsewhere).
+    /// macOS recorded at wip/gpt-patch on top of v0.2.70; Linux recorded
+    /// from a real Linux build (Swift 6.1.3: GitHub CI x86_64 and arm64
+    /// both gave this value) for 0.2.71.
+    #if os(macOS)
     static let standardFileToolsSHA256 = "8624edfa6a98173b49e4f230706270361de5c13aee111a8264adc7c7025676a7"
+    #else
+    static let standardFileToolsSHA256 = "4b9a1c7cf23893842cd96ff4527b4e2878a1528823b66f138e285767b87e926b"
+    #endif
 
     static func surfaceTests(_ t: CPTest) {
         for web in [true, false] {

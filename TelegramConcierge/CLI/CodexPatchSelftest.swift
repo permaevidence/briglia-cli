@@ -138,6 +138,21 @@ final class CPTest: @unchecked Sendable {
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try? data.write(to: URL(fileURLWithPath: path))
     }
+    /// An in-place overwrite that is guaranteed to change the file's stat
+    /// identity. Linux stamps inode times from a coarse clock (one kernel
+    /// tick, a few ms), so a same-size in-place write within the tick of the
+    /// previous write leaves size, inode, mtime and ctime all equal — no
+    /// stat-based check can see it (a disclosed platform limit, not a
+    /// port bug). The K checks are about what Briglia does once the change
+    /// is visible, so the write is repeated until it is.
+    func writeVisibly(_ path: String, _ text: String) {
+        let before = (try? FileIdentity.lstatPath(path)) ?? nil
+        for _ in 0..<500 {
+            write(path, text)
+            guard let before, let now = (try? FileIdentity.lstatPath(path)) ?? nil, now == before else { return }
+            usleep(2_000)
+        }
+    }
     func read(_ path: String) -> String? { (try? Data(contentsOf: URL(fileURLWithPath: path))).map { String(decoding: $0, as: UTF8.self) } }
     func bytes(_ path: String) -> Data? { try? Data(contentsOf: URL(fileURLWithPath: path)) }
     func exists(_ path: String) -> Bool {

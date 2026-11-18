@@ -135,6 +135,8 @@ extension GPTProfileSelftest {
             ("cd '<abs with space>' && …", "cd '/tmp/a b' && apply_patch <<'EOF'\n\(body)\nEOF"),
             ("CRLF lines", "apply_patch <<'EOF'\r\n\(body.replacingOccurrences(of: "\n", with: "\r\n"))\r\nEOF\r\n"),
             ("trailing whitespace only", "apply_patch <<'EOF'\n\(body)\nEOF\n   \n"),
+            ("CRLF lines, unquoted delimiter", "apply_patch <<EOF\r\n\(body.replacingOccurrences(of: "\n", with: "\r\n"))\r\nEOF\r\n"),
+            ("CRLF lines after cd <abs> &&", "cd /tmp && apply_patch <<'EOF'\r\n\(body.replacingOccurrences(of: "\n", with: "\r\n"))\r\nEOF"),
         ]
         for (label, command) in accepted {
             let parsed = GPTShellIntercept.patchBody(command: command)
@@ -157,6 +159,14 @@ extension GPTProfileSelftest {
             ("other command", "cat <<'EOF'\n\(body)\nEOF"),
             ("bad delimiter", "apply_patch <<'E-O'\n\(body)\nE-O"),
             ("early delimiter then statements", "apply_patch <<'EOF'\n*** Begin Patch\nEOF\nrm -rf /tmp/x\nEOF"),
+            // 0.2.71 Linux audit: checks run on Unicode scalars, so neither a
+            // CRLF Character nor a combining mark hides a "\n", "$", "`" or "\\".
+            ("CRLF: early delimiter then statements", "apply_patch <<'EOF'\r\n*** Begin Patch\r\nEOF\r\nrm -rf /tmp/x\r\nEOF"),
+            ("CRLF: trailing command", "apply_patch <<'EOF'\r\n\(body.replacingOccurrences(of: "\n", with: "\r\n"))\r\nEOF\r\necho done"),
+            ("unquoted body with $ + combining mark", "apply_patch <<EOF\n\(body)\n+$\u{301}HOME\nEOF"),
+            ("unquoted body with backtick + combining mark", "apply_patch <<EOF\n\(body)\n+`\u{301}id`\nEOF"),
+            ("cd \"…$+combining mark…\" &&", "cd \"/tmp/$\u{301}x\" && apply_patch <<'EOF'\n\(body)\nEOF"),
+            ("cd unquoted path with $ + combining mark", "cd /tmp/$\u{301}x && apply_patch <<'EOF'\n\(body)\nEOF"),
         ]
         for (label, command) in refused {
             t.check("I does not intercept: \(label)", GPTShellIntercept.patchBody(command: command) == nil, command)
@@ -315,6 +325,7 @@ extension GPTProfileSelftest {
     static func shellReadTests(_ t: CPTest) {
         let d = t.dir("shell")
         t.write(d + "/a.txt", "a\nb\n"); t.write(d + "/b.txt", "b\n"); t.write(d + "/sp ace.txt", "s\n"); t.write(d + "/e.txt", "")
+        t.write(d + "/cr\r\nlf.txt", "x\n")
         try? FileManager.default.createDirectory(atPath: d + "/dir", withIntermediateDirectories: true)
         symlink(d + "/a.txt", d + "/ln.txt")
         let a = d + "/a.txt"
@@ -340,9 +351,13 @@ extension GPTProfileSelftest {
             ("cat a.txt", "relative/dir"), ("cat \(d)/dir", nil), ("cat \(d)/ln.txt", nil), ("cat \(d)/missing.txt", nil),
             ("cat \"$HOME/x\"", nil), ("cat \(a)\ncat \(a)", nil), ("(cat \(a))", nil), ("cat ~/x", nil), ("less \(a)", nil),
             ("cat", nil), ("", nil), ("head -n", nil), ("nl -b a \(a)", nil),
+            // 0.2.71 Linux audit: a CRLF Character still makes the command multi-line.
+            ("cat \(a)\r\ncat \(a)", nil), ("cat \(d)/cr\r\nlf.txt", nil), ("cat \(a)\rcat \(a)", nil),
         ]
         for (command, workdir) in no {
-            t.check("H not recognised: \(command.replacingOccurrences(of: d, with: "D").replacingOccurrences(of: "\n", with: "⏎"))",
+            let shown = command.replacingOccurrences(of: d, with: "D").unicodeScalars
+                .map { $0 == "\n" ? "⏎" : $0 == "\r" ? "␍" : String($0) }.joined()
+            t.check("H not recognised: \(shown)",
                     GPTShellRead.target(command: command, workdir: workdir) == nil)
         }
         t.check("H table size ≥ 40", yes.count + no.count >= 40)

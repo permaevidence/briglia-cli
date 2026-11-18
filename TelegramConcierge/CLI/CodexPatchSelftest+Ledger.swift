@@ -21,8 +21,9 @@ extension CodexPatchSelftest {
             let r2 = await t.apply(t.wrap("*** Delete File: \(p)"))
             t.check("K.2 a standard (legacy) record never unlocks a GPT Delete (F3, P46)", r2.outcome.status == .refused && t.exists(p), r2.text)
             await t.seed(p)
-            // Same size, same second: a replacement must still be caught (inode/ctime/ns).
-            t.write(p, "y\n")
+            // Same size, same second: a replacement must still be caught
+            // (inode/ctime/ns), once the filesystem's timestamps can show it.
+            t.writeVisibly(p, "y\n")
             let r3 = await t.apply(t.wrap("*** Delete File: \(p)"))
             t.check("K.3 a same-size replacement after the read makes the record stale", r3.outcome.status == .refused && t.read(p) == "y\n", r3.text)
             await t.seed(p)
@@ -63,7 +64,7 @@ extension CodexPatchSelftest {
             let d = t.dir("k12"); let p = d + "/r.txt"
             t.write(p, "a\n")
             let r = await t.apply(t.wrap("*** Update File: \(p)\n@@\n-a\n+b"))
-            t.write(p, "c\n")
+            t.writeVisibly(p, "c\n")
             await CodexPatch.settleEvidence(r)
             let rec = await FileTimeTracker.shared.gptRecord(forKey: PrivateStorage.canonical(p))
             t.check("K.12 a replacement between commit and settlement earns no .gptPatch record (P52)", rec == nil)
@@ -71,7 +72,7 @@ extension CodexPatchSelftest {
             await t.seed(p)
             let before = await FileTimeTracker.shared.gptRecord(forKey: PrivateStorage.canonical(p))
             let r2 = await t.apply(t.wrap("*** Update File: \(p)\n@@\n-c\n+d"))
-            t.write(p, "e\n")
+            t.writeVisibly(p, "e\n")
             await CodexPatch.settleEvidence(r2)
             let after = await FileTimeTracker.shared.gptRecord(forKey: PrivateStorage.canonical(p))
             t.check("K.13 an older GPT record is never refreshed from an unseen replacement (§21 note 3)",
@@ -102,7 +103,7 @@ extension CodexPatchSelftest {
             let d = t.dir("k16"); let p = d + "/s.txt"
             t.write(p, "one\n")
             await t.seed(p)
-            t.write(p, "two\n")
+            t.writeVisibly(p, "two\n")
             let r = await t.apply(t.wrap("*** Update File: \(p)\n@@\n-one\n+uno"))
             t.check("K.16 a context miss on a stale file adds 'changed since you last read it'",
                     r.outcome.category == .context && r.text.contains("note: \(p) changed since you last read it at "), r.text)

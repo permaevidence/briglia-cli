@@ -689,7 +689,10 @@ enum GPTShellRead {
     /// nil. Recognition only; crediting has further conditions (§7).
     static func target(command: String, workdir: String?) -> String? {
         let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cmd.isEmpty, !cmd.contains("\n"), !cmd.contains("\r") else { return nil }
+        // Unicode scalars, not Characters: "\r\n" is ONE Character, and
+        // `String.contains(String)` answers differently on Darwin and Linux
+        // Foundation for it.
+        guard !cmd.isEmpty, !cmd.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else { return nil }
         // Pipes split stages; no `||` (rejected by `words` anyway).
         let stages = cmd.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
         guard let first = stages.first, let firstWords = words(first) else { return nil }
@@ -778,15 +781,16 @@ enum GPTShellIntercept {
         // Then a newline (LF or CRLF; Swift treats "\r\n" as one Character).
         guard let nl = s.first, nl == "\n" || nl == "\r\n" else { return nil }
         s = s.dropFirst()
-        // UTF-16 splitting: a CRLF ending is one Swift Character, so
-        // Character-level splitting would never see the "\n" in it.
-        let lines = String(s).components(separatedBy: "\n")
+        // Split on the "\n" scalar: a CRLF ending is one Swift Character, so
+        // Character-level splitting never sees the "\n" in it, and
+        // `components(separatedBy:)` does not split it on Linux Foundation.
+        let lines = scalarLines(String(s))
         var body: [String] = []
         var found = false
         var index = 0
         while index < lines.count {
             var line = lines[index]
-            if line.hasSuffix("\r") { line.removeLast() }
+            if line.unicodeScalars.last == "\r" { line.unicodeScalars.removeLast() }
             if line == word { found = true; break }
             body.append(lines[index]); index += 1
         }
@@ -794,8 +798,28 @@ enum GPTShellIntercept {
         let after = lines[(index + 1)...].joined(separator: "\n")
         guard after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let bodyText = body.joined(separator: "\n")
-        if !quoted, bodyText.contains("$") || bodyText.contains("`") || bodyText.contains("\\") { return nil }
+        if !quoted, containsScalar(bodyText, "$`\\") { return nil }
         return (bodyText + "\n", cdPath)
+    }
+
+    /// The text split after every "\n" scalar, the "\n" dropped (a "\r"
+    /// before it stays); always one more element than there are "\n"s,
+    /// like Darwin's `components(separatedBy: "\n")`, on every platform.
+    static func scalarLines(_ text: String) -> [String] {
+        var out: [String] = []
+        var current = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            if scalar == "\n" { out.append(String(current)); current = String.UnicodeScalarView() } else { current.append(scalar) }
+        }
+        out.append(String(current))
+        return out
+    }
+
+    /// Whether `text` contains any of the scalars of `set` (a combining
+    /// mark after "$" must not hide it, on any platform).
+    static func containsScalar(_ text: String, _ set: String) -> Bool {
+        let wanted = Set(set.unicodeScalars)
+        return text.unicodeScalars.contains(where: { wanted.contains($0) })
     }
 
     /// One absolute path word: unquoted (no metacharacters) or single /
@@ -806,11 +830,11 @@ enum GPTShellIntercept {
             let rest = s.dropFirst()
             guard let end = rest.firstIndex(of: first) else { return nil }
             let path = String(rest[..<end])
-            if first == "\"" && (path.contains("$") || path.contains("`") || path.contains("\\")) { return nil }
+            if first == "\"" && containsScalar(path, "$`\\") { return nil }
             return (path, rest[rest.index(after: end)...])
         }
         let word = s.prefix { $0 != " " }
-        guard !word.contains(where: { "'\"\\$`;&|<>(){}*?[]~!#".contains($0) }) else { return nil }
+        guard !containsScalar(String(word), "'\"\\$`;&|<>(){}*?[]~!#") else { return nil }
         return (String(word), s.dropFirst(word.count))
     }
 
