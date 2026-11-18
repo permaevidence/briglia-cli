@@ -46,6 +46,16 @@
       "sha256": "c3dbf58039cd06e857a3c8199711ecd2aadbc304f870180c395991f00d4dad0b",
       "toolchain": "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)\nTarget: arm64-apple-macosx15.0",
       "diff_vs_ci-darwin-arm64-r2-image20261028": "scripts/chat_lifecycle_fixture_diff.py: all captures and all observations identical except captures[42] media-rehydrated-0 and captures[43] media-missing-0, whose rendered-page JPEGs differ only in the APP2 ICC profile (Apple profile date 2026-10-26 16:08:25 sha256 b1e4b41e... -> 2026-11-01 20:21:51 sha256 e72c2d3d..., same length 3312); all other JPEG segments and the entropy-coded scan are byte-identical. Independent decode (Pillow 11.3.0): both JPEGs 400x200 RGB, decoded pixel sha256 35229321b3939b44... in both fixtures. Instrumentation record: only runner_sha256 differs (scripts/chat_lifecycle_baseline.py changed in 6285d18, 0.2.67 live-menu UserDefaults deltas); source, platform and toolchain identical."
+    },
+    "ci-darwin-arm64-r2-image20261112.json": {
+      "binary_sha256": "af2d6db8832bc245f0b6df2883d0586080315dd58cf840344ed9bcdc4ef98847",
+      "ci_run": 44228301977,
+      "platform": "darwin-arm64",
+      "recorded_from": "pinned SOURCE (unchanged, as recorded in the fixture's source field) on briglia-cli-private wip/release-130-lcrec (temporary macOS-only recording run that aborts on any other image, upload-on-failure; never promoted)",
+      "runner_image": "macos-15-arm64 20261112.0539.3",
+      "sha256": "6992a71e91c2bcd9c70357e25c9dff35bf8714a493d0e1a674c469c8adcabca6",
+      "toolchain": "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)\nTarget: arm64-apple-macosx15.0",
+      "diff_vs_ci-darwin-arm64-r2-image20261104": "scripts/chat_lifecycle_fixture_diff.py (exit 0): all captures and all observations identical except captures[42] media-rehydrated-0 and captures[43] media-missing-0, whose rendered-page JPEGs differ only in the APP2 ICC profile (Apple profile date 2026-11-01 20:21:51 sha256 e72c2d3d... -> 2026-11-08 20:22:31 sha256 b4448f8f..., same length 3312); all other JPEG segments and the entropy-coded scan (4240 bytes) are byte-identical, so the pixels are identical. Instrumentation record: only runner_sha256 differs; source, platform and toolchain identical."
     }
   },
   "note": "All references built from pinned SOURCE. Original 77 wire cases / 26 lifecycle observations and 39 requests matched their previous same-compiler references; only reviewed additions. Local Apple Swift 6.3, CI Apple Swift 6.1.2 and Linux Swift 6.1.3. Never regenerate from the candidate.",
