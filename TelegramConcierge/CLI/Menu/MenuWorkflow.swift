@@ -2200,6 +2200,15 @@ final class MenuWorkflow {
         }
     }
 
+    /// The failures a best-effort step may be passed over for.
+    static func ordinaryFailure(_ outcome: SetupJobRunner.Outcome) -> Bool {
+        switch outcome {
+        case .exited(let code): return code != 0
+        case .timedOut, .failedToStart: return true
+        case .signaled, .cancelled: return false
+        }
+    }
+
     private func installTools(_ checkpoint: @escaping @Sendable () throws -> Void) -> (Bool, String?) {
         guard busy == nil else { return (false, L("Please wait for the current installation to finish.", "Aspetta che finisca l\u{2019}installazione in corso.")) }
         guard let status = toolchain else { return (false, L("Still checking what\u{2019}s installed \u{2014} try again in a moment.", "Sto ancora controllando cosa è installato: riprova tra un attimo.")) }
@@ -2232,10 +2241,19 @@ final class MenuWorkflow {
                 if !r.ok {
                     let why = "\(job.label): \(r.failureReason ?? "failed")"
                     for line in r.excerpt { self.appendJobLine(line) }
-                    // Only an ordinary failure (exit status, timeout, could
-                    // not start) is passed over: never a stop, nor processes
-                    // the runner could not confirm gone.
-                    if job.bestEffort, r.survivors == nil, !r.enumerationFailed, r.outcome != .cancelled {
+                    // A best-effort step killed by a signal (Ctrl-C in the
+                    // terminal, SIGTERM, SIGKILL) is an interrupt: the run
+                    // ends and nothing after it starts (Codex round 1, P2).
+                    if job.bestEffort, case .signaled(let sig) = r.outcome {
+                        let label = LinuxPackageMap.signalLabel(sig)
+                        failure = self.L("\(job.label) was interrupted (signal \(label)), so nothing was installed",
+                                         "\(job.label) è stato interrotto (segnale \(label)), quindi non è stato installato nulla")
+                        break
+                    }
+                    // Only an ordinary failure (non-zero exit, timeout, could
+                    // not start) is passed over: never a stop or a signal,
+                    // nor processes the runner could not confirm gone.
+                    if job.bestEffort, r.survivors == nil, !r.enumerationFailed, Self.ordinaryFailure(r.outcome) {
                         bestEffortFailure = why
                         self.appendJobLine(self.L("\u{26A0} Could not refresh the package lists (\(why)); installing anyway.",
                                                   "\u{26A0} Non è stato possibile aggiornare l\u{2019}elenco dei pacchetti (\(why)); installo comunque."))

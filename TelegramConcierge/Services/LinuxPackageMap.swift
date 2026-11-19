@@ -57,6 +57,12 @@ enum LinuxPackageMap {
     static func refreshCommand(manager: String, managerPath: String) -> [String]? {
         manager == "apt-get" ? [managerPath, "update"] : nil
     }
+
+    /// "signal 2, SIGINT" for the interrupt messages (number alone for others).
+    static func signalLabel(_ signal: Int32) -> String {
+        let names: [Int32: String] = [1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 9: "SIGKILL", 15: "SIGTERM"]
+        return names[signal].map { "\(signal), \($0)" } ?? "\(signal)"
+    }
 }
 
 /// One installer run's system-package installs, one package at a time (the
@@ -64,11 +70,16 @@ enum LinuxPackageMap {
 /// before the first install of the run, never again. A failed refresh does
 /// not stop the install (offline, or one broken third-party repository);
 /// its reason is added to the install's failure text if the install fails
-/// too. Each install is attempted exactly once. Pure: the commands run
-/// through `run`, so the selftest drives it with a fake on any platform.
+/// too. Each install is attempted exactly once. A command killed by a
+/// signal (Ctrl-C in the terminal, SIGTERM, SIGKILL) is an interrupt: it
+/// ends the run, and no later install of this session runs (Codex round 1,
+/// P2). Pure: the commands run through `run`, so the selftest drives it
+/// with a fake on any platform.
 final class LinuxInstallSession: @unchecked Sendable {
     enum Outcome: Equatable {
         case exited(Int32)
+        /// Killed by this signal (Foundation: `terminationReason == .uncaughtSignal`).
+        case signaled(Int32)
         case launchFailed(String)
     }
 
@@ -79,6 +90,8 @@ final class LinuxInstallSession: @unchecked Sendable {
     private let lock = NSLock()
     private var refreshAttempted = false
     private var refreshFailure: String?
+    /// Set by the first interrupted command; the run is over.
+    private var interruption: String?
 
     init(run: @escaping ([String]) -> Outcome, announce: @escaping (String) -> Void = { _ in }) {
         self.run = run
@@ -88,12 +101,19 @@ final class LinuxInstallSession: @unchecked Sendable {
     /// nil = installed, else a one-line failure.
     func install(_ package: String, manager: String, managerPath: String) -> String? {
         lock.lock(); defer { lock.unlock() }
+        if let interruption {
+            return "not installed: the installation was interrupted (\(interruption)). Run it again to retry."
+        }
         if !refreshAttempted, let refresh = LinuxPackageMap.refreshCommand(manager: manager, managerPath: managerPath) {
             refreshAttempted = true
             announce("Refreshing package lists (\(manager) update)\u{2026}")
             switch run(refresh) {
             case .exited(0): break
             case .exited(let code): refreshFailure = "\(manager) update exited with status \(code)"
+            case .signaled(let sig):
+                let why = "\(manager) update was interrupted (signal \(LinuxPackageMap.signalLabel(sig)))"
+                interruption = why
+                return "Installation interrupted: \(why), so \(package) was not installed. Run it again to retry."
             case .launchFailed(let why): refreshFailure = "failed to launch \(manager) update: \(why)"
             }
         }
@@ -101,6 +121,10 @@ final class LinuxInstallSession: @unchecked Sendable {
         switch run(LinuxPackageMap.installCommand(manager: manager, managerPath: managerPath, packages: [package])) {
         case .exited(0): return nil
         case .exited(let code): failure = "\(manager) exited with status \(code)"
+        case .signaled(let sig):
+            let why = "\(manager) was interrupted (signal \(LinuxPackageMap.signalLabel(sig)))"
+            interruption = why
+            failure = "Installation interrupted: \(why)"
         case .launchFailed(let why): failure = "failed to launch \(manager): \(why)"
         }
         guard let refreshFailure else { return failure }

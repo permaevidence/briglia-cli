@@ -153,15 +153,23 @@ enum ToolchainService {
     /// The process's installer run (the wizard, `briglia python-env install`).
     private static let linuxInstallSession = LinuxInstallSession(run: { argv in
         guard let sudo = PlatformBinary.find("sudo") else { return .launchFailed("sudo not found") }
+        return runThroughTerminal(executable: sudo, arguments: argv)
+    }, announce: { print("  \($0)") })
+    #endif
+
+    /// One command through the terminal hand-off, with its outcome as the
+    /// installer session needs it: a signal death stays a signal
+    /// (`terminationReason`), never an exit status (Codex round 1, P2).
+    static func runThroughTerminal(executable: String, arguments: [String]) -> LinuxInstallSession.Outcome {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: sudo)
-        process.arguments = argv
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         do { try TerminalHandoff.runLendingForeground(process) } catch {
             return .launchFailed(error.localizedDescription)
         }
+        if process.terminationReason == .uncaughtSignal { return .signaled(process.terminationStatus) }
         return .exited(process.terminationStatus)
-    }, announce: { print("  \($0)") })
-    #endif
+    }
 
     /// Absolute path to the python3 the agent's bash tool would resolve.
     static func python3Path() -> String? {
