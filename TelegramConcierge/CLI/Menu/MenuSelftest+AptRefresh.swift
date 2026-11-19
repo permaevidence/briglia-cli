@@ -110,7 +110,7 @@ extension MenuSelftestContext {
         }
 
         // MARK: C. The menu ("Install what's missing") with fake sudo + apt-get
-        func fakeDir(update: Int, install: Int, updateSleeps: Bool = false) -> URL {
+        func fakeDir(update: Int, install: Int, updateSleeps: Bool = false, updateCommand: String? = nil) -> URL {
             let d = tempRoot.appendingPathComponent("apt-\(UUID().uuidString.prefix(8))", isDirectory: true)
             try? fm.createDirectory(at: d, withIntermediateDirectories: true)
             let sudo = "#!/bin/sh\nexec \"$@\"\n"
@@ -119,7 +119,7 @@ extension MenuSelftestContext {
             dir=$(dirname "$0")
             echo "$*" >> "$dir/calls.log"
             case "$1" in
-              update) echo "Hit:1 http://deb.debian.org/debian trixie InRelease"; \(updateSleeps ? "sleep 20; " : "")exit \(update) ;;
+              update) echo "Hit:1 http://deb.debian.org/debian trixie InRelease"; \(updateCommand.map { $0 + "; " } ?? "")\(updateSleeps ? "sleep 20; " : "")exit \(update) ;;
               install)
                 if [ \(install) -eq 0 ]; then touch "$dir/installed"; exit 0; fi
                 echo "E: Failed to fetch http://deb.debian.org/debian-security/pool/updates/main/l/libreoffice/x.deb  404  Not Found"
@@ -137,7 +137,8 @@ extension MenuSelftestContext {
         func calls(_ d: URL) -> [String] {
             ((try? String(contentsOf: d.appendingPathComponent("calls.log"), encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
         }
-        func workflow(_ d: URL, language: String = "en", bestEffort: Bool = true) async -> MenuWorkflow {
+        func workflow(_ d: URL, language: String = "en", bestEffort: Bool = true,
+                      adjustRefresh: @escaping @Sendable (inout SetupJobRunner.Spec) -> Void = { _ in }) async -> MenuWorkflow {
             let w = world()
             var e = env(w, linux: true)
             e.language = language
@@ -151,7 +152,7 @@ extension MenuSelftestContext {
             e.quick.toolchainJobs = { _ in
                 QuickSetupEnvironment.linuxPackageJobs(manager: "apt-get", managerPath: d.appendingPathComponent("apt-get").path,
                                                        sudo: d.appendingPathComponent("sudo").path, packages: ["pandoc"])
-                    .map { var j = $0; j.mode = .detached; if !bestEffort { j.bestEffort = false }; return j }
+                    .map { var j = $0; j.mode = .detached; if !bestEffort { j.bestEffort = false }; if j.bestEffort { adjustRefresh(&j) }; return j }
             }
             let m = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
             m.now = { w.clock }
@@ -219,6 +220,50 @@ extension MenuSelftestContext {
         try? await Task.sleep(nanoseconds: 300_000_000)
         check("apt refresh (menu): the page shuts down during the refresh → the install never starts",
               calls(d7) == ["update"] && !fm.fileExists(atPath: d7.appendingPathComponent("installed").path), "\(calls(d7))")
+
+        // MARK: E. An interrupted refresh ends the install (Codex round 1, P2)
+        // A signal death of the refresh (Ctrl-C in the terminal hand-off, SIGTERM, SIGKILL) is an interrupt: the
+        // install never starts. Only an ordinary failure (non-zero exit, timeout, could not start) is passed over.
+        // The selftest runs the jobs detached (no terminal to lend), and a detached runner child starts with
+        // SIGINT/SIGTERM blocked (the `__setsid-exec` trampoline's mask), so the fake unblocks before killing
+        // itself; in real use the refresh is a terminal job, whose child starts with an empty mask.
+        func killSelf(_ name: String) -> String {
+            if name == "SIGKILL" { return "kill -KILL $$" }   // cannot be blocked or caught
+            return "exec /usr/bin/python3 -I -c \"import os,signal; signal.signal(signal.\(name), signal.SIG_DFL); signal.pthread_sigmask(signal.SIG_SETMASK, []); os.kill(os.getpid(), signal.\(name))\""
+        }
+        for (name, number) in [("SIGINT", 2), ("SIGTERM", 15), ("SIGKILL", 9)] {
+            let d = fakeDir(update: 0, install: 0, updateCommand: killSelf(name))
+            let m = await workflow(d)
+            _ = await act(m, ["action": "tools_install"])
+            let e = tools(m)["error"] as? String ?? ""
+            check("apt refresh (menu): the refresh is killed by \(name) → interrupted, the install never starts",
+                  calls(d) == ["update"] && !fm.fileExists(atPath: d.appendingPathComponent("installed").path)
+                  && e == "Installation stopped \u{2014} apt-get update was interrupted (signal \(number), \(name)), so nothing was installed."
+                  && !m.jobLines.contains { $0.contains("installing anyway") },
+                  "\(calls(d)) \(e) \(m.jobLines)")
+        }
+        let dIt = fakeDir(update: 0, install: 0, updateCommand: killSelf("SIGINT"))
+        let mIt = await workflow(dIt, language: "it")
+        _ = await act(mIt, ["action": "tools_install"])
+        let eIt = tools(mIt)["error"] as? String ?? ""
+        check("apt refresh (menu, Italian): an interrupted refresh says so in Italian",
+              calls(dIt) == ["update"]
+              && eIt == "Installazione interrotta: apt-get update è stato interrotto (segnale 2, SIGINT), quindi non è stato installato nulla.",
+              "\(calls(dIt)) \(eIt)")
+        // Controls: the ordinary failures still go on to the install (exit 100 is row C2 above).
+        let dTimeout = fakeDir(update: 0, install: 0, updateSleeps: true)
+        let mTimeout = await workflow(dTimeout, adjustRefresh: { $0.timeout = 1 })
+        _ = await act(mTimeout, ["action": "tools_install"])
+        check("apt refresh (menu): control — a refresh that times out still goes on to the install",
+              calls(dTimeout) == ["update", "install -y pandoc"] && tools(mTimeout)["complete"] as? Bool == true
+              && mTimeout.jobLines.contains { $0.contains("apt-get update: timed out); installing anyway") },
+              "\(calls(dTimeout)) \(mTimeout.jobLines)")
+        let dNoStart = fakeDir(update: 0, install: 0)
+        let mNoStart = await workflow(dNoStart, adjustRefresh: { $0.command[0] = "/nonexistent/briglia-apt-selftest/sudo" })
+        _ = await act(mNoStart, ["action": "tools_install"])
+        check("apt refresh (menu): control — a refresh whose program is missing (the trampoline exits 127) still goes on to the install",
+              calls(dNoStart) == ["install -y pandoc"] && tools(mNoStart)["complete"] as? Bool == true,
+              "\(calls(dNoStart)) \(mNoStart.jobLines)")
 
         // MARK: D. The real planner on this host
         #if os(Linux)
