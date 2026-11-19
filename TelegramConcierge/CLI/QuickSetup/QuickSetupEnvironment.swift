@@ -192,12 +192,29 @@ struct QuickSetupEnvironment {
         let venv = (!pipPackages.isEmpty && manager.name == "apt-get") ? venvPackageNeeded() : nil
         if !logical.isEmpty || venv != nil {
             let packages = logical.map { LinuxPackageMap.package($0, manager: manager.name) } + (venv.map { [$0] } ?? [])
-            jobs.append(.init(row: "toolchain", command: [sudo] + LinuxPackageMap.installCommand(manager: manager.name, managerPath: managerPath, packages: packages),
-                              mode: .terminalHandoff, timeout: 2400, environment: ["DEBIAN_FRONTEND": "noninteractive"],
-                              label: "\(manager.name) install \(packages.joined(separator: " "))"))
+            jobs += linuxPackageJobs(manager: manager.name, managerPath: managerPath, sudo: sudo, packages: packages)
         }
         if !pipPackages.isEmpty { jobs.append(pythonEnvJob) }
         #endif
+        return jobs
+    }
+
+    /// The terminal jobs installing `packages` with the distribution's
+    /// manager: apt-get first refreshes its package lists (field report
+    /// 2026-11-18: stale lists → "404 Not Found" for a package whose security
+    /// update replaced the old .deb). The refresh is best effort: if it
+    /// fails, the install still runs and the menu adds the refresh's reason
+    /// to the install's failure. Pure (the selftest pins it on any platform).
+    static func linuxPackageJobs(manager: String, managerPath: String, sudo: String, packages: [String]) -> [SetupJobRunner.Spec] {
+        guard !packages.isEmpty else { return [] }
+        var jobs: [SetupJobRunner.Spec] = []
+        if let refresh = LinuxPackageMap.refreshCommand(manager: manager, managerPath: managerPath) {
+            jobs.append(.init(row: "toolchain", command: [sudo] + refresh, mode: .terminalHandoff, timeout: 600,
+                              environment: ["DEBIAN_FRONTEND": "noninteractive"], label: "\(manager) update", bestEffort: true))
+        }
+        jobs.append(.init(row: "toolchain", command: [sudo] + LinuxPackageMap.installCommand(manager: manager, managerPath: managerPath, packages: packages),
+                          mode: .terminalHandoff, timeout: 2400, environment: ["DEBIAN_FRONTEND": "noninteractive"],
+                          label: "\(manager) install \(packages.joined(separator: " "))"))
         return jobs
     }
 

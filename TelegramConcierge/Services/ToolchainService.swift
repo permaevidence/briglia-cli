@@ -141,17 +141,26 @@ enum ToolchainService {
     /// own the terminal (sudo password, dpkg conffile/trigger prompts), so it
     /// runs through TerminalHandoff — a plain spawn leaves it in a background
     /// process group whose first tty read SIGTTIN-freezes the install.
+    ///
+    /// apt-get: the process's first install refreshes the package lists first
+    /// (`sudo apt-get update`, once per process; LinuxInstallSession).
     private static func linuxInstall(_ package: String, manager: LinuxPackageManager) -> String? {
-        guard let sudo = PlatformBinary.find("sudo") else { return "sudo not found" }
+        guard PlatformBinary.find("sudo") != nil else { return "sudo not found" }
         guard let managerPath = PlatformBinary.find(manager.name) else { return "\(manager.name) not found" }
+        return linuxInstallSession.install(package, manager: manager.name, managerPath: managerPath)
+    }
+
+    /// The process's installer run (the wizard, `briglia python-env install`).
+    private static let linuxInstallSession = LinuxInstallSession(run: { argv in
+        guard let sudo = PlatformBinary.find("sudo") else { return .launchFailed("sudo not found") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sudo)
-        process.arguments = [managerPath] + manager.installArgs + [package]
+        process.arguments = argv
         do { try TerminalHandoff.runLendingForeground(process) } catch {
-            return "failed to launch \(manager.name): \(error.localizedDescription)"
+            return .launchFailed(error.localizedDescription)
         }
-        return process.terminationStatus == 0 ? nil : "\(manager.name) exited with status \(process.terminationStatus)"
-    }
+        return .exited(process.terminationStatus)
+    }, announce: { print("  \($0)") })
     #endif
 
     /// Absolute path to the python3 the agent's bash tool would resolve.

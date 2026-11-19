@@ -32,6 +32,10 @@ final class SetupJobRunner: @unchecked Sendable {
         var timeout: TimeInterval
         var environment: [String: String] = [:]
         var label: String
+        /// A step whose failure does not stop the steps after it (the menu
+        /// reports it and goes on): apt-get's package-list refresh before an
+        /// install (QuickSetupEnvironment.linuxPackageJobs).
+        var bestEffort = false
     }
 
     struct Survivor: Codable, Equatable {

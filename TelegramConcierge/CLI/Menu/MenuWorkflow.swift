@@ -2220,6 +2220,9 @@ final class MenuWorkflow {
         let t = Task { @MainActor [weak self] in
             guard let self else { return }
             var failure: String?
+            // A best-effort step that failed (apt-get's package-list refresh):
+            // the next steps still run; its reason joins a later failure.
+            var bestEffortFailure: String?
             for (index, job) in jobs.enumerated() {
                 // A revoked session (new link, Close, shutdown) starts no further step.
                 if (try? checkpoint()) == nil || Task.isCancelled { failure = self.L("stopped", "interrotta"); break }
@@ -2227,8 +2230,22 @@ final class MenuWorkflow {
                 self.appendJobLine("\u{25B6} \(job.label)")
                 let r = await self.runner.run(job)
                 if !r.ok {
-                    failure = "\(job.label): \(r.failureReason ?? "failed")"
+                    let why = "\(job.label): \(r.failureReason ?? "failed")"
                     for line in r.excerpt { self.appendJobLine(line) }
+                    // Only an ordinary failure (exit status, timeout, could
+                    // not start) is passed over: never a stop, nor processes
+                    // the runner could not confirm gone.
+                    if job.bestEffort, r.survivors == nil, !r.enumerationFailed, r.outcome != .cancelled {
+                        bestEffortFailure = why
+                        self.appendJobLine(self.L("\u{26A0} Could not refresh the package lists (\(why)); installing anyway.",
+                                                  "\u{26A0} Non è stato possibile aggiornare l\u{2019}elenco dei pacchetti (\(why)); installo comunque."))
+                        continue
+                    }
+                    failure = why
+                    if let bestEffortFailure {
+                        failure = why + self.L(" (refreshing the package lists before it also failed: \(bestEffortFailure))",
+                                               " (anche l\u{2019}aggiornamento dell\u{2019}elenco dei pacchetti prima non era riuscito: \(bestEffortFailure))")
+                    }
                     break
                 }
             }

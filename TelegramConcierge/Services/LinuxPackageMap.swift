@@ -45,4 +45,65 @@ enum LinuxPackageMap {
     static func installCommand(manager: String, managerPath: String, packages: [String]) -> [String] {
         [managerPath] + installArgs(for: manager) + packages
     }
+
+    /// The package-list refresh to run (after `sudo`) once before an
+    /// installer run's first install, or nil for managers that need none.
+    /// apt-get only (field report 2026-11-18): with stale lists, a package
+    /// whose Debian security update replaced the old .deb fails with
+    /// "404 Not Found". `apt-get update` only refreshes the lists; it never
+    /// upgrades an installed package. dnf refreshes its metadata itself;
+    /// pacman is left alone on purpose (`-Sy` without `-u` is a partial
+    /// upgrade, unsupported on Arch).
+    static func refreshCommand(manager: String, managerPath: String) -> [String]? {
+        manager == "apt-get" ? [managerPath, "update"] : nil
+    }
+}
+
+/// One installer run's system-package installs, one package at a time (the
+/// setup wizard, python3.X-venv): the package lists are refreshed once,
+/// before the first install of the run, never again. A failed refresh does
+/// not stop the install (offline, or one broken third-party repository);
+/// its reason is added to the install's failure text if the install fails
+/// too. Each install is attempted exactly once. Pure: the commands run
+/// through `run`, so the selftest drives it with a fake on any platform.
+final class LinuxInstallSession: @unchecked Sendable {
+    enum Outcome: Equatable {
+        case exited(Int32)
+        case launchFailed(String)
+    }
+
+    /// Runs one argument vector (after `sudo`).
+    private let run: ([String]) -> Outcome
+    /// Told right before the refresh starts.
+    private let announce: (String) -> Void
+    private let lock = NSLock()
+    private var refreshAttempted = false
+    private var refreshFailure: String?
+
+    init(run: @escaping ([String]) -> Outcome, announce: @escaping (String) -> Void = { _ in }) {
+        self.run = run
+        self.announce = announce
+    }
+
+    /// nil = installed, else a one-line failure.
+    func install(_ package: String, manager: String, managerPath: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        if !refreshAttempted, let refresh = LinuxPackageMap.refreshCommand(manager: manager, managerPath: managerPath) {
+            refreshAttempted = true
+            announce("Refreshing package lists (\(manager) update)\u{2026}")
+            switch run(refresh) {
+            case .exited(0): break
+            case .exited(let code): refreshFailure = "\(manager) update exited with status \(code)"
+            case .launchFailed(let why): refreshFailure = "failed to launch \(manager) update: \(why)"
+            }
+        }
+        let failure: String
+        switch run(LinuxPackageMap.installCommand(manager: manager, managerPath: managerPath, packages: [package])) {
+        case .exited(0): return nil
+        case .exited(let code): failure = "\(manager) exited with status \(code)"
+        case .launchFailed(let why): failure = "failed to launch \(manager): \(why)"
+        }
+        guard let refreshFailure else { return failure }
+        return failure + " (refreshing the package lists before it also failed: \(refreshFailure))"
+    }
 }
