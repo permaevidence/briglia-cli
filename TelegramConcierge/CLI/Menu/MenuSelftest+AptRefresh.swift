@@ -95,14 +95,18 @@ extension MenuSelftestContext {
               && r5b == "failed to launch apt-get: no tty (refreshing the package lists before it also failed: failed to launch apt-get update: no tty)",
               "\(c5.argv) \(String(describing: r5b))")
 
-        for (manager, args) in [("dnf", ["install", "-y"]), ("pacman", ["-S", "--noconfirm", "--needed"])] {
+        let others: [(String, [String])] = [("dnf", ["install", "-y"]), ("pacman", ["-S", "--noconfirm", "--needed"])]
+        for (manager, args) in others {
             let c = Calls()
             let s = session(c, install: .exited(1))
-            let r = s.install("pandoc", manager: manager, managerPath: "/usr/bin/\(manager)")
-            _ = s.install("ffmpeg", manager: manager, managerPath: "/usr/bin/\(manager)")
+            let bin = "/usr/bin/" + manager
+            let r = s.install("pandoc", manager: manager, managerPath: bin)
+            _ = s.install("ffmpeg", manager: manager, managerPath: bin)
+            let want: [[String]] = [[bin] + args + ["pandoc"], [bin] + args + ["ffmpeg"]]
+            let sameArgv = c.argv == want
+            let sameText = r == manager + " exited with status 1"
             check("apt refresh (wizard): \(manager) unchanged — installs only, the same arguments and text",
-                  c.argv == [["/usr/bin/\(manager)"] + args + ["pandoc"], ["/usr/bin/\(manager)"] + args + ["ffmpeg"]]
-                  && r == "\(manager) exited with status 1" && c.announced.isEmpty, "\(c.argv) \(String(describing: r))")
+                  sameArgv && sameText && c.announced.isEmpty, "\(c.argv) \(String(describing: r))")
         }
 
         // MARK: C. The menu ("Install what's missing") with fake sudo + apt-get
@@ -225,8 +229,9 @@ extension MenuSelftestContext {
             let jobs = QuickSetupEnvironment.defaultToolchainJobs(.init(doctorRan: true, missing: ["pandoc"], libreOffice: true, mandatoryMissing: ["pandoc"]))
             QuickSetupEnvironment.venvPackageNeeded = saved
             let pandoc = LinuxPackageMap.package("pandoc", manager: manager.name)
-            let expected: [[String]] = (manager.name == "apt-get" ? [[sudo, path, "update"]] : [])
-                + [[sudo] + LinuxPackageMap.installCommand(manager: manager.name, managerPath: path, packages: [pandoc])]
+            var expected: [[String]] = []
+            if manager.name == "apt-get" { expected.append([sudo, path, "update"]) }
+            expected.append([sudo] + LinuxPackageMap.installCommand(manager: manager.name, managerPath: path, packages: [pandoc]))
             check("apt refresh: this host's real plan (\(manager.name)) is the planner's", jobs.map(\.command) == expected
                   && jobs.allSatisfy { $0.mode == .terminalHandoff }, "\(jobs.map(\.command))")
         } else {
