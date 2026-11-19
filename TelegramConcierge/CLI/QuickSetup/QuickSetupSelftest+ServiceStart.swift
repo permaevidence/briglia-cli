@@ -131,13 +131,14 @@ extension SelftestContext {
             .init(doctorRan: true, missing: missing, libreOffice: libre, mandatoryMissing: missing)
         }
         let onlyPy = QuickSetupEnvironment.defaultToolchainJobs(status(["python-docx"]))
-        let apt = onlyPy.first { $0.mode == .terminalHandoff }
+        // The apt install job (apt-get's best-effort list refresh runs before it: MenuSelftest+AptRefresh).
+        let apt = onlyPy.first { $0.mode == .terminalHandoff && !$0.bestEffort }
         check("python packages missing + no venv → a terminal apt job installs python3.12-venv",
               apt?.command.suffix(1) == ["python3.12-venv"] && apt?.command.contains("install") == true, "\(onlyPy.map(\.command))")
         check("…and it runs before the detached python-env job",
               (onlyPy.firstIndex { $0.mode == .terminalHandoff } ?? 99) < (onlyPy.firstIndex { $0.command.contains("python-env") } ?? -1), "\(onlyPy.map(\.label))")
         let mixed = QuickSetupEnvironment.defaultToolchainJobs(status(["python-docx", "ffmpeg"], libre: false))
-        let mixedApt = mixed.filter { $0.mode == .terminalHandoff }
+        let mixedApt = mixed.filter { $0.mode == .terminalHandoff && !$0.bestEffort }
         check("with other system packages → one apt job carrying them and the venv package",
               mixedApt.count == 1 && mixedApt[0].command.suffix(3) == ["ffmpeg", "libreoffice", "python3.12-venv"], "\(mixedApt.map(\.command))")
         asked = 0

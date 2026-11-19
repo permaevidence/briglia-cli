@@ -59,6 +59,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.namedServers()
         await t.round5()
         await t.openRouterDefault()
+        await t.aptRefresh()
         #if os(macOS)
         await t.pythonBootstrap()
         #endif
