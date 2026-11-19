@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LP = "TelegramConcierge/Services/LinuxPackageMap.swift"
 QE = "TelegramConcierge/CLI/QuickSetup/QuickSetupEnvironment.swift"
 MW = "TelegramConcierge/CLI/Menu/MenuWorkflow.swift"
+TS = "TelegramConcierge/Services/ToolchainService.swift"
 
 # (label, check label prefix that must fail, file, old, new) — all in __menu-selftest
 BREAKS = [
@@ -67,6 +68,24 @@ BREAKS = [
      "                    if job.bestEffort, r.survivors == nil,", "                    if r.survivors == nil,"),
     ("M4 the menu gives no warning line", "apt refresh (menu): the refresh fails → the install still runs", MW,
      '                        self.appendJobLine(self.L("\\u{26A0} Could not refresh', '                        _ = (self.L("\\u{26A0} Could not refresh'),
+    # Round 2 (Codex round 1, P2): an interrupted refresh ends the install.
+    ("I1 the menu passes over a signal-killed refresh", "apt refresh (menu): the refresh is killed by SIGINT", MW,
+     "                    if job.bestEffort, case .signaled(let sig) = r.outcome {",
+     "                    if false, job.bestEffort, case .signaled(let sig) = r.outcome {"),
+    ("I2 the menu stops at a timed-out refresh", "apt refresh (menu): control — a refresh that times out still goes on", MW,
+     "        case .timedOut, .failedToStart: return true", "        case .timedOut, .failedToStart: return false"),
+    ("I3 the menu stops at an ordinary failed refresh", "apt refresh (menu): the refresh fails → the install still runs", MW,
+     "        case .exited(let code): return code != 0\n        case .timedOut", "        case .exited: return false\n        case .timedOut"),
+    ("I4 the wizard adapter drops the signal", "apt refresh (wizard adapter): a refresh killed by SIGINT", TS,
+     "        if process.terminationReason == .uncaughtSignal { return .signaled(process.terminationStatus) }\n", ""),
+    ("I5 the wizard installs after an interrupted refresh", "apt refresh (wizard): the refresh is interrupted → nothing installed", LP,
+     "                interruption = why\n                return \"Installation interrupted: \\(why), so \\(package) was not installed. Run it again to retry.\"",
+     "                refreshFailure = why"),
+    ("I6 the wizard forgets an interruption", "apt refresh (wizard): the refresh is interrupted → nothing installed", LP,
+     "        if let interruption {\n            return \"not installed: the installation was interrupted (\\(interruption)). Run it again to retry.\"\n        }\n", ""),
+    ("I7 an interrupted install does not end the run", "apt refresh (wizard): an interrupted install ends the run", LP,
+     "            interruption = why\n            failure = \"Installation interrupted: \\(why)\"",
+     "            failure = \"Installation interrupted: \\(why)\""),
 ]
 
 

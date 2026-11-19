@@ -21,7 +21,7 @@ extension MenuSelftestContext {
               && apt.map(\.command) == [["/usr/bin/sudo", "/usr/bin/apt-get", "update"],
                                         ["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "poppler-utils", "libreoffice"]],
               "\(apt.map(\.command))")
-        check("apt refresh: only the refresh is best effort; both are terminal jobs (one sudo prompt, same terminal)",
+        check("apt refresh: only the refresh is best effort; both are terminal jobs (same terminal, so sudo may reuse its cached login)",
               apt.map(\.bestEffort) == [true, false] && apt.allSatisfy { $0.mode == .terminalHandoff }
               && apt.allSatisfy { $0.environment == ["DEBIAN_FRONTEND": "noninteractive"] }, "\(apt.map(\.bestEffort))")
         check("apt refresh: the refresh never upgrades (no upgrade, dist-upgrade or full-upgrade anywhere)",
@@ -264,6 +264,61 @@ extension MenuSelftestContext {
         check("apt refresh (menu): control — a refresh whose program is missing (the trampoline exits 127) still goes on to the install",
               calls(dNoStart) == ["install -y pandoc"] && tools(mNoStart)["complete"] as? Bool == true,
               "\(calls(dNoStart)) \(mNoStart.jobLines)")
+
+        // MARK: F. The wizard / python-env path: the real terminal adapter + the session (Codex round 1, P2)
+        // `ToolchainService.runThroughTerminal` is the adapter the Linux session uses (sudo resolved by
+        // PlatformBinary there; the fake sudo here). Without a terminal, the hand-off just runs and waits.
+        func adapter(_ d: URL, _ argv: [String]) -> LinuxInstallSession.Outcome {
+            // The child inherits this process's stdout (as in real use): flush first so its
+            // lines never land inside a half-written check line of ours.
+            fflush(stdout)
+            return ToolchainService.runThroughTerminal(executable: d.appendingPathComponent("sudo").path, arguments: argv)
+        }
+        for (name, number) in [("SIGINT", Int32(2)), ("SIGTERM", Int32(15)), ("SIGKILL", Int32(9))] {
+            let d = fakeDir(update: 0, install: 0, updateCommand: killSelf(name))
+            let out = adapter(d, [d.appendingPathComponent("apt-get").path, "update"])
+            check("apt refresh (wizard adapter): a refresh killed by \(name) is reported as that signal, not an exit status",
+                  out == .signaled(number), "\(out)")
+        }
+        let dExit = fakeDir(update: 100, install: 0)
+        let dMissing = tempRoot.appendingPathComponent("apt-missing-\(UUID().uuidString.prefix(6))")
+        let exitOut = adapter(dExit, [dExit.appendingPathComponent("apt-get").path, "update"])
+        let missingOut = adapter(dMissing, ["update"])
+        var missingIsLaunchFailure = false
+        if case .launchFailed = missingOut { missingIsLaunchFailure = true }
+        check("apt refresh (wizard adapter): an ordinary exit stays an exit status; a missing program cannot launch",
+              exitOut == .exited(100) && missingIsLaunchFailure, "\(exitOut) \(missingOut)")
+
+        let dInt = fakeDir(update: 0, install: 0, updateCommand: killSelf("SIGINT"))
+        let sInt = LinuxInstallSession(run: { adapter(dInt, $0) })
+        let aptInt = dInt.appendingPathComponent("apt-get").path
+        let rInt = sInt.install("pandoc", manager: "apt-get", managerPath: aptInt)
+        let rInt2 = sInt.install("ffmpeg", manager: "apt-get", managerPath: aptInt)
+        check("apt refresh (wizard): the refresh is interrupted → nothing installed, and the run is over",
+              calls(dInt) == ["update"] && !fm.fileExists(atPath: dInt.appendingPathComponent("installed").path)
+              && rInt == "Installation interrupted: apt-get update was interrupted (signal 2, SIGINT), so pandoc was not installed. Run it again to retry."
+              && rInt2 == "not installed: the installation was interrupted (apt-get update was interrupted (signal 2, SIGINT)). Run it again to retry.",
+              "\(calls(dInt)) \(String(describing: rInt)) | \(String(describing: rInt2))")
+        let dCtl = fakeDir(update: 100, install: 0)
+        let sCtl = LinuxInstallSession(run: { adapter(dCtl, $0) })
+        let rCtl = sCtl.install("pandoc", manager: "apt-get", managerPath: dCtl.appendingPathComponent("apt-get").path)
+        check("apt refresh (wizard): control — an ordinary failed refresh (exit 100) still goes on to the install",
+              rCtl == nil && calls(dCtl) == ["update", "install -y pandoc"], "\(calls(dCtl)) \(String(describing: rCtl))")
+
+        let cTerm = Calls()
+        let sTerm = session(cTerm, install: .signaled(15))
+        let rTerm = sTerm.install("libreoffice", manager: "apt-get", managerPath: "/usr/bin/apt-get")
+        let rTerm2 = sTerm.install("pandoc", manager: "apt-get", managerPath: "/usr/bin/apt-get")
+        check("apt refresh (wizard): an interrupted install ends the run; the next install never runs",
+              rTerm == "Installation interrupted: apt-get was interrupted (signal 15, SIGTERM)"
+              && cTerm.argv == [["/usr/bin/apt-get", "update"], ["/usr/bin/apt-get", "install", "-y", "libreoffice"]]
+              && rTerm2?.hasPrefix("not installed: the installation was interrupted (apt-get was interrupted (signal 15, SIGTERM))") == true,
+              "\(cTerm.argv) \(String(describing: rTerm)) | \(String(describing: rTerm2))")
+        let cKill = Calls()
+        let rKill = session(cKill, update: .signaled(9)).install("pandoc", manager: "apt-get", managerPath: "/usr/bin/apt-get")
+        check("apt refresh (wizard): any signal counts (SIGKILL on the refresh → no install)",
+              cKill.argv == [["/usr/bin/apt-get", "update"]] && rKill?.contains("signal 9, SIGKILL") == true,
+              "\(cKill.argv) \(String(describing: rKill))")
 
         // MARK: D. The real planner on this host
         #if os(Linux)
